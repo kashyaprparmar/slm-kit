@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  SLM Kit design system — "slate + electric violet".
+  Dark is the default (index.html sets class="dark"); .light overrides it.
+  All colors are HSL triplets so Tailwind's `hsl(var(--x) / alpha)` works.
+*/
+@layer base {
+  .dark {
+    --background: 222 32% 6%;
+    --foreground: 222 24% 92%;
+    --surface: 222 26% 9%;
+    --elevated: 222 24% 12%;
+    --card: 222 24% 10%;
+    --card-foreground: 222 24% 92%;
+
+    --muted: 222 20% 16%;
+    --muted-foreground: 222 12% 60%;
+
+    --primary: 252 100% 68%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 252 90% 66%;
+    --accent-foreground: 0 0% 100%;
+
+    --success: 152 60% 46%;
+    --warning: 38 92% 55%;
+    --danger: 356 78% 60%;
+
+    --border: 222 18% 18%;
+    --input: 222 18% 20%;
+    --ring: 252 100% 68%;
+    --radius: 0.75rem;
+  }
+
+  :root,
+  .light {
+    --background: 220 30% 97%;
+    --foreground: 222 30% 12%;
+    --surface: 0 0% 100%;
+    --elevated: 220 20% 99%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 30% 12%;
+
+    --muted: 220 18% 92%;
+    --muted-foreground: 222 12% 40%;
+
+    --primary: 252 90% 60%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 252 90% 60%;
+    --accent-foreground: 0 0% 100%;
+
+    --success: 152 55% 38%;
+    --warning: 32 90% 44%;
+    --danger: 356 70% 50%;
+
+    --border: 220 16% 86%;
+    --input: 220 16% 84%;
+    --ring: 252 90% 60%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Subtle ambient gradient behind the app for depth. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(60rem 40rem at 100% -10%, hsl(var(--primary) / 0.08), transparent 60%),
+      radial-gradient(50rem 40rem at -10% 110%, hsl(252 90% 60% / 0.06), transparent 55%);
+    pointer-events: none;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted));
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); background-clip: content-box; }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .card-surface {
+    @apply rounded-lg border bg-card text-card-foreground shadow-card;
+  }
+  .gradient-text {
+    background: linear-gradient(100deg, hsl(var(--foreground)), hsl(var(--primary)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* Skeleton shimmer */
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-muted;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0;
+    background: linear-gradient(90deg, transparent, hsl(var(--foreground) / 0.06), transparent);
+    transform: translateX(-100%);
+    animation: shimmer 1.6s infinite;
+  }
+}
