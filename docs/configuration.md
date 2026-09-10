@@ -8,8 +8,8 @@ same names in a `.env` file inside `backend/` (see `backend/.env.example`).
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SLMKIT_HOME` | `~/.slmkit` | Where all data lives (DB, datasets, models, runs) |
-| `SLMKIT_HOST` | `127.0.0.1` | API bind address |
+| `SLMKIT_HOME` | `~/.slmkit` (native) / `/data/slmkit` (Docker) | Where all data lives (DB, datasets, models, runs) |
+| `SLMKIT_HOST` | `127.0.0.1` (native) / `0.0.0.0` (Docker) | API bind address |
 | `SLMKIT_PORT` | `8000` | API port |
 | `SLMKIT_CORS_ORIGINS` | `localhost:5173` origins | Allowed browser origins (JSON list) |
 
@@ -57,7 +57,8 @@ SLMKIT_JUDGE_API_KEY=sk-ant-xxxxxxxx
 SLMKIT_LLAMACPP_DIR=/home/you/llama.cpp
 ```
 
-Restart the backend after changing configuration.
+Restart after changing configuration: `docker compose up -d --force-recreate backend`
+(or restart native `uvicorn`). Compose loads `backend/.env` automatically.
 
 ## How "fits / tight / won't fit" is decided
 

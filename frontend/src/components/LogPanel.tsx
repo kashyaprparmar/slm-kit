@@ -137,7 +137,7 @@ export function LogPanel({
         ref={scrollRef}
         onScroll={handleScroll}
         className={cn(
-          "overflow-y-auto rounded-md border bg-[hsl(222_32%_4%)] p-3 font-mono text-[11px] leading-relaxed",
+          "dark overflow-y-auto rounded-md border bg-[hsl(222_32%_4%)] p-3 font-mono text-[11px] leading-relaxed text-foreground",
           expanded ? "flex-1" : "h-64",
         )}
       >

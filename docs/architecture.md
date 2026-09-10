@@ -2,16 +2,19 @@
 
 How SLM Kit is put together — for the curious, and for anyone extending it.
 
+Recommended deploy is **Docker Compose**: nginx (or Vite in dev) on port 5173
+proxies `/api` and `/ws` to the FastAPI backend on port 8000. See [Docker](docker.md).
+
 ## Big picture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Browser (React + Vite + Tailwind)   http://localhost:5173    │
+│  Browser (React)                     http://localhost:5173    │
 │  8 pages · live charts · resource strip · WebSocket streams   │
 └───────────────┬──────────────────────────────┬───────────────┘
         REST /api│                       WS /ws/*│
 ┌───────────────▼──────────────────────────────▼───────────────┐
-│  FastAPI backend  (127.0.0.1:8000)                            │
+│  FastAPI backend  (:8000)                                     │
 │                                                               │
 │  API routers ─ system · datasets · runs · registry · advisor  │
 │                · eval                                          │

@@ -1,0 +1,50 @@
+# SLM Kit — Docker Compose (GPU-enabled backend + nginx frontend)
+#
+# Quick start:
+#   docker compose up --build -d
+#   open http://localhost:5173
+#
+# CPU-only (no GPU / no nvidia-container-toolkit):
+#   docker compose -f docker-compose.cpu.yml up --build -d
+#
+# Optional secrets — copy backend/.env.example → backend/.env and fill in HF token, etc.
+
+name: slmkit
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: slmkit-backend
+    ports:
+      - "8000:8000"
+    environment:
+      SLMKIT_HOME: /data/slmkit
+      SLMKIT_HOST: 0.0.0.0
+      SLMKIT_PORT: 8000
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    env_file:
+      - path: ./backend/.env
+        required: false
+    volumes:
+      - slmkit-data:/data/slmkit
+    gpus: all
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: slmkit-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  slmkit-data:
+    name: slmkit-data

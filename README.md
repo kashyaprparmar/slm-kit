@@ -14,20 +14,42 @@ datacenter. Every default is chosen to run on first try on that hardware.
 
 Full guides live in [`docs/`](docs/README.md):
 
-- **[Quickstart](docs/quickstart.md)** — running in 10 minutes (Windows/WSL2, Linux, macOS)
+- **[Quickstart](docs/quickstart.md)** — Docker in a few commands, then your first fine-tune
+- **[Docker](docs/docker.md)** — GPU / CPU / dev compose, volumes, env
 - **[Requirements](docs/requirements.md)** · **[Installation](docs/installation.md)** · **[Configuration](docs/configuration.md)** · **[Commands](docs/commands.md)**
 - **[Architecture](docs/architecture.md)** · **[API reference](docs/api-reference.md)** · **[Troubleshooting](docs/troubleshooting.md)**
 - **Page guides:** [Dashboard](docs/pages/dashboard.md) · [Dataset Manager](docs/pages/dataset-manager.md) · [Pretraining](docs/pages/pretraining-studio.md) · [Domain Adaptation](docs/pages/domain-adaptation-studio.md) · [Fine-Tuning](docs/pages/fine-tuning-studio.md) · [Eval Lab](docs/pages/eval-lab.md) · [Model Registry](docs/pages/model-registry.md) · [Run History](docs/pages/run-history.md)
 
 ---
 
-## Why WSL2
+## Run with Docker (recommended)
 
-The primary training engine (**Unsloth**) and its stack (`bitsandbytes`,
-`triton`, flash-attention) are reliable on **Linux**. On Windows the supported
-path is **WSL2 (Ubuntu) with CUDA passthrough** to your RTX 4060. You still open
-the UI in your normal Windows browser at `http://localhost:5173`; only the
-backend + training run inside WSL2.
+The training stack (Unsloth, bitsandbytes, CUDA torch) lives in a **Linux
+container**. On Windows you still open the UI at `http://localhost:5173`; GPU
+passthrough comes from Docker Desktop + your NVIDIA driver.
+
+```powershell
+# from the project root — GPU / training (first build is several GB)
+docker compose up --build -d
+
+# UI only (no torch / no training)
+# docker compose -f docker-compose.cpu.yml up --build -d
+```
+
+Open **http://localhost:5173**. Stop with `docker compose down`.
+
+| Need | Command / file |
+|------|----------------|
+| GPU training | `docker compose up --build -d` |
+| CPU / UI only | `docker compose -f docker-compose.cpu.yml up --build -d` |
+| Hot reload | `docker compose -f docker-compose.dev.yml up --build` |
+| Logs | `docker compose logs -f` |
+| Wipe data | `docker compose down -v` |
+
+Data persists in the `slmkit-data` volume (`/data/slmkit` in the backend).
+Optional secrets: copy `backend/.env.example` → `backend/.env`.
+
+Full walkthrough: [docs/quickstart.md](docs/quickstart.md) · [docs/docker.md](docs/docker.md).
 
 ---
 
@@ -35,49 +57,18 @@ backend + training run inside WSL2.
 
 | Component | Version |
 |-----------|---------|
-| OS        | Windows 11 + **WSL2 (Ubuntu 22.04+)** |
-| NVIDIA driver | Recent Windows driver with WSL CUDA support |
-| CUDA (in WSL) | 12.1+ (pulled in by the PyTorch wheels) |
-| Python    | 3.11 (recommended) |
-| Node.js   | 20+ (for the frontend) |
-| uv        | latest — `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Docker Desktop or Engine + Compose | recent |
+| NVIDIA driver | Recent host driver; Docker Desktop **GPU** enabled |
+| CUDA toolkit | *not needed on the host* — bundled in the GPU image |
 
-Verify GPU passthrough inside WSL2 with `nvidia-smi` before installing.
+Native (no-Docker) install still works if you want it — [Installation](docs/installation.md#3-without-docker-native-install).
 
 ---
 
-## Setup (backend)
+## Configuration
 
-Run these **inside WSL2**:
-
-```bash
-cd backend
-
-# Core API (no CUDA needed — UI, registry, dataset validation, fit estimator):
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -e .
-
-# GPU/training stack (Unsloth, torch, trl, peft, bitsandbytes):
-uv pip install -e ".[gpu]"
-
-# Optional eval metrics (ROUGE/BLEU):
-uv pip install -e ".[eval]"
-```
-
-Run the API:
-
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Everything persistent lives under `~/.slmkit/` (SQLite DB, datasets, models,
-run workdirs). Delete that directory to reset.
-
-### Configuration
-
-Copy `.env.example` → `.env` (or export env vars). All are optional; the core
-loop works fully offline without any of them:
+Copy `backend/.env.example` → `backend/.env` (or export env vars). All are
+optional; the core loop works fully offline without any of them:
 
 | Var | Purpose |
 |-----|---------|
@@ -85,7 +76,7 @@ loop works fully offline without any of them:
 | `SLMKIT_JUDGE_API_KEY` | Optional LLM-as-judge key (Anthropic/OpenAI) |
 | `SLMKIT_JUDGE_PROVIDER` | `anthropic` (default) or `openai` |
 | `SLMKIT_LLAMACPP_DIR` | llama.cpp checkout, enables GGUF export |
-| `SLMKIT_HOME` | Override the data directory (default `~/.slmkit`) |
+| `SLMKIT_HOME` | Data directory (Docker default `/data/slmkit`) |
 
 ---
 
@@ -100,11 +91,11 @@ back to a built-in VRAM estimator** (weights + optimizer + activations + KV cach
 
 ---
 
-## Setup (frontend)
+## Frontend
 
-Vite + React + TypeScript + Tailwind + Radix, with a bespoke **"slate + electric
-violet"** dark-first design system. Fonts (Inter + JetBrains Mono) are bundled
-locally, so the UI runs fully offline.
+Vite + React + TypeScript + Tailwind + Radix. Fonts (Inter + JetBrains Mono)
+are bundled locally, so the UI runs fully offline. Docker serves the production
+build via nginx (proxies `/api` and `/ws` to the backend). Native dev:
 
 ```bash
 cd frontend
@@ -112,22 +103,12 @@ npm install
 npm run dev      # http://localhost:5173  (proxies /api and /ws to :8000)
 ```
 
-Build for production with `npm run build`. The dev server proxies REST (`/api`)
-and WebSockets (`/ws`) to the backend on `:8000`, so run the backend alongside it.
-
-**Built so far:** app shell with the persistent live **resource strip** (VRAM /
-GPU / RAM / CPU / disk over WebSocket), theme toggle, **Dashboard**, and the full
-**Dataset Manager** (drag-drop upload, validation report with line numbers, token
-histogram, sample preview, sample-dataset installer). The Studios, Eval Lab,
-Registry, and Run History pages are stubbed with their planned scope and wired to
-existing backend endpoints — they're the next build milestone.
-
 ---
 
 ## First-run walkthrough (the QLoRA vertical slice)
 
-1. **Start the API.** On first boot it creates `~/.slmkit/` and auto-installs
-   the bundled sample datasets.
+1. **Start the stack.** `docker compose up --build -d`. First boot creates
+   `/data/slmkit` (volume `slmkit-data`) and auto-installs the bundled samples.
 2. **Confirm hardware** — `GET /api/system/hardware` shows live VRAM/RAM/CPU/disk.
 3. **List datasets** — `GET /api/datasets` includes the four samples:
    tiny story corpus (pretrain), finance domain corpus (domain adaptation),
@@ -159,7 +140,7 @@ existing backend endpoints — they're the next build milestone.
 ```
 backend/app/
   main.py            FastAPI app + WebSocket endpoints
-  config.py          Settings + ~/.slmkit layout
+  config.py          Settings + data home layout (~/.slmkit or /data/slmkit)
   domain.py          Shared types: RunConfig, Method, MemoryEstimate, …
   db/                SQLModel registry (runs, datasets, checkpoints, artifacts)
   core/

@@ -28,21 +28,30 @@ and blocks configs that would clearly OOM.
 
 ## Software
 
+**Docker (recommended)** — you do not install Python or Node on the host.
+
 | Software | Version | Needed for |
 |---|---|---|
-| Windows 11 + **WSL2 Ubuntu 22.04+**, native Linux, or native Windows (see quickstart Step 2b) | — | training backend |
-| NVIDIA driver (Windows/Linux host) | recent, WSL-CUDA capable | GPU passthrough |
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Engine + Compose | recent | run the app |
+| NVIDIA driver (host) | recent; Docker Desktop **GPU** enabled | GPU passthrough into the backend container |
+| CUDA toolkit | *not needed separately* — the GPU image bundles it | — |
+
+**Native install (optional)** — only if you skip Docker. See [Installation](installation.md#3-without-docker-native-install).
+
+| Software | Version | Needed for |
+|---|---|---|
+| Windows 11 + WSL2 Ubuntu, native Linux, or native Windows | — | training backend |
 | Python | **3.11** | backend |
-| [uv](https://github.com/astral-sh/uv) | latest | Python installs (fast) |
+| [uv](https://github.com/astral-sh/uv) | latest | Python installs |
 | Node.js | **20+** | frontend |
-| CUDA toolkit | *not needed separately* — PyTorch wheels bundle it | — |
 
 ## Python packages (installed for you)
 
 - **Base** (`uv pip install -e .`): FastAPI, SQLModel, huggingface-hub, psutil,
   pynvml, httpx — runs the API without any GPU stack.
 - **`[gpu]`**: torch, transformers, datasets, tokenizers, accelerate, peft, trl,
-  bitsandbytes, **unsloth** — the actual training stack. Linux/WSL2 only.
+  bitsandbytes, **unsloth** — the actual training stack. Included in the GPU
+  Docker image; on a native install, Linux/WSL2 (or Windows CUDA torch first).
 - **`[eval]`**: rouge-score, sacrebleu, nltk — extra metrics for the Eval Lab
   (exact-match and token-F1 work without this).
 - **pyarrow** (optional): only if you upload `.parquet` datasets.

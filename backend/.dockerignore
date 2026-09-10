@@ -1,0 +1,12 @@
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+.env
+.env.*
+!.env.example
+unsloth_compiled_cache
+.pytest_cache
+.ruff_cache
+.git
+.gitignore

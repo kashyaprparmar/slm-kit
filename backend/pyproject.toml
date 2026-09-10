@@ -2,7 +2,7 @@
 name = "slm-kit"
 version = "0.1.0"
 description = "Self-hosted platform for the full small-language-model lifecycle on a single-GPU workstation."
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.11"
 
 # Base install: runs the FastAPI API, the SQLite registry, hardware polling,

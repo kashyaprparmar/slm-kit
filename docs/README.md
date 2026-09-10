@@ -15,7 +15,8 @@ RTX 4060 with 8 GB VRAM and 16 GB RAM). Every default is chosen so it *fits*.
 
 | I want to… | Read this |
 |---|---|
-| Get it running in 10 minutes | [Quickstart](quickstart.md) |
+| Get it running in 10 minutes (Docker) | [Quickstart](quickstart.md) |
+| Docker compose files, volumes, GPU vs CPU | [Docker](docker.md) |
 | Check my PC can run it | [Requirements](requirements.md) |
 | Do a full, careful install (+ optional tools) | [Installation](installation.md) |
 | See every setting / environment variable | [Configuration](configuration.md) |

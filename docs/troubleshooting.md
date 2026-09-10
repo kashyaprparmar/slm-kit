@@ -8,10 +8,29 @@ Common problems and fixes. Most issues are environment/GPU related, not the app.
 
 ### The resource strip says "Detecting…" forever
 The frontend can't reach the backend, or the GPU isn't visible.
-- Is the backend running? Check `http://127.0.0.1:8000/api/health`.
-- Is it on port 8000? The dev server proxies to `127.0.0.1:8000`.
+- Docker: `docker compose ps` — both `slmkit-backend` and `slmkit-frontend`
+  should be **healthy**. Then `curl http://127.0.0.1:8000/api/health`.
+- Native: is uvicorn running on port 8000? The Vite proxy targets `127.0.0.1:8000`.
 - Check GPU: `http://127.0.0.1:8000/api/system/hardware` should show your GPU
   and `"source":"pynvml"`. If it says `"fallback"`, see the GPU section below.
+
+### `docker compose` fails with "cannot connect to the docker API"
+Docker Desktop isn't running. Start it, wait until `docker info` works, retry.
+
+### GPU compose starts but training says `No module named 'torch'`
+You are on the **CPU** stack (`docker-compose.cpu.yml`). Stop it and start the
+default GPU file:
+
+```powershell
+docker compose -f docker-compose.cpu.yml down
+docker compose up --build -d
+```
+
+### Docker GPU container: `torch.cuda.is_available()` is False
+- Docker Desktop → **Settings → Resources → GPU** enabled
+- Host `nvidia-smi` shows the card
+- Recreate: `docker compose down && docker compose up -d`
+- Confirm: `docker exec slmkit-backend python -c "import torch; print(torch.cuda.is_available())"`
 
 ### `pip`/`uv install` of `[gpu]` fails or is huge
 The GPU stack (torch + CUDA wheels + Unsloth) is several GB.
@@ -42,13 +61,12 @@ plain PyPI, overwriting your CUDA build.
   native Windows, re-run `python -c "import torch; print(torch.cuda.is_available())"`
   to catch this early.
 
-### `address already in use` on port 8000
-Another server (or a leftover one) is using the port.
-- Change it: `uvicorn app.main:app --port 8001` (the frontend proxy expects
-  8000, so prefer freeing 8000).
-- Find/kill the old one — Linux: `lsof -i :8000`; Windows PowerShell:
-  `Get-Process python | Stop-Process` (careful) or reboot WSL with
-  `wsl --shutdown`.
+### `address already in use` on port 8000 or 5173
+Another server (or leftover containers / a native uvicorn) is using the port.
+- Docker: `docker compose down`, then `docker compose up -d`
+- Native: `uvicorn app.main:app --port 8001` (prefer freeing 8000 — the proxy
+  expects it). Linux: `lsof -i :8000`. Windows: stop the leftover Python
+  process, or `wsl --shutdown` if you were on WSL.
 
 ---
 
@@ -111,21 +129,22 @@ Same root cause as above — open the frontend terminal and look for repeating
 ## GPU not detected (`source: fallback`)
 
 The app runs, but with no real VRAM numbers and CPU-only training.
-- Inside WSL2, run `nvidia-smi` — if it fails, the GPU isn't passing through.
-  Update your **Windows** NVIDIA driver (the WSL side needs no driver).
-- Try `wsl --shutdown` (from PowerShell) then reopen Ubuntu.
-- On a machine with genuinely no NVIDIA GPU, `fallback` is expected — Unsloth
-  training won't work, but everything else does.
+- **Docker:** enable GPU in Docker Desktop, confirm `nvidia-smi` on the host,
+  then `docker compose down && docker compose up -d` (the default GPU file,
+  not `docker-compose.cpu.yml`).
+- **WSL2 native:** `nvidia-smi` inside Ubuntu. If it fails, update the
+  **Windows** NVIDIA driver. `wsl --shutdown` then reopen Ubuntu.
+- No NVIDIA GPU: `fallback` is expected — Unsloth training won't work.
 
 ---
 
 ## Training runs
 
 ### Run immediately fails with "No module named 'torch'"
-You installed only the core, not the training stack.
-```bash
-uv pip install -e ".[gpu]"     # inside WSL2/Linux
-```
+The running backend has no training stack.
+- **Docker:** you started `docker-compose.cpu.yml`. Switch to
+  `docker compose up --build -d`.
+- **Native:** install the extra: `uv pip install -e ".[gpu]"` (Linux/WSL2).
 
 ### Run fails with a CUDA out-of-memory error
 The fit guard blocks obvious OOMs, but real usage can still spike.
@@ -162,8 +181,8 @@ A training or eval job is using the GPU. Wait for it to finish (Run History
 shows what's active) — the Eval Lab shares the single GPU on purpose.
 
 ### ROUGE/BLEU are missing from my scorecard
-Those need the eval extra: `uv pip install -e ".[eval]"`. Exact-match and
-token-F1 always work; missing metric libs are skipped, not errored.
+Those need the eval extra (already in both Docker images). Native:
+`uv pip install -e ".[eval]"`. Exact-match and token-F1 always work.
 
 ### The LLM-as-judge checkbox is disabled
 No judge key configured. Set `SLMKIT_JUDGE_API_KEY` (and provider/model) — see
@@ -203,18 +222,20 @@ advice. You *can* proceed; just expect lower quality from very small data.
 
 Wipe all local state (runs, models, datasets, DB) and start fresh:
 
-```bash
-rm -rf ~/.slmkit          # or the folder set by SLMKIT_HOME
+```powershell
+docker compose down -v    # Docker: wipe the slmkit-data volume
+# native: rm -rf ~/.slmkit   (or the folder set by SLMKIT_HOME)
 ```
 
-Restart the backend; it recreates the folder and reinstalls the sample datasets.
+Start again (`docker compose up -d` or restart uvicorn). The backend recreates
+the layout and reinstalls the sample datasets.
 
 ---
 
 ## Still stuck?
 
-- Backend logs print in the terminal running `uvicorn` — the real error is
-  usually there.
+- Backend logs: `docker compose logs -f backend` (or the terminal running
+  `uvicorn`). The real error is usually there.
 - A failed run's **exact error** is shown in Run History's detail card.
 - Interactive API docs at `http://127.0.0.1:8000/docs` let you poke endpoints
   directly to isolate frontend vs backend issues.

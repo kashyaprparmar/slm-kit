@@ -1,0 +1,51 @@
+# Dev Compose — hot reload for backend + Vite dev server
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#   open http://localhost:5173
+#
+# Source is bind-mounted; changes reload automatically.
+
+name: slmkit-dev
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.cpu
+    container_name: slmkit-backend-dev
+    ports:
+      - "8000:8000"
+    environment:
+      SLMKIT_HOME: /data/slmkit
+      SLMKIT_HOST: 0.0.0.0
+      SLMKIT_PORT: 8000
+    env_file:
+      - path: ./backend/.env
+        required: false
+    volumes:
+      - slmkit-data-dev:/data/slmkit
+      - ./backend/app:/app/app:ro
+      - ./backend/data:/app/data:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: slmkit-frontend-dev
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/public:/app/public
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  slmkit-data-dev:
+    name: slmkit-data-dev

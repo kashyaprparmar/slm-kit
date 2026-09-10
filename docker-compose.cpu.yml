@@ -1,0 +1,41 @@
+# SLM Kit — CPU-only Compose (UI, datasets, fit estimates; no GPU training)
+#
+#   docker compose -f docker-compose.cpu.yml up --build -d
+#   open http://localhost:5173
+
+name: slmkit
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.cpu
+    container_name: slmkit-backend
+    ports:
+      - "8000:8000"
+    environment:
+      SLMKIT_HOME: /data/slmkit
+      SLMKIT_HOST: 0.0.0.0
+      SLMKIT_PORT: 8000
+    env_file:
+      - path: ./backend/.env
+        required: false
+    volumes:
+      - slmkit-data:/data/slmkit
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: slmkit-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  slmkit-data:
+    name: slmkit-data
