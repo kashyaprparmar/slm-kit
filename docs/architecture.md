@@ -10,17 +10,17 @@ proxies `/api` and `/ws` to the FastAPI backend on port 8000. See [Docker](docke
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Browser (React)                     http://localhost:5173    │
-│  8 pages · live charts · resource strip · WebSocket streams   │
+│  workflow pages · live charts · resource strip · logger dock   │
 └───────────────┬──────────────────────────────┬───────────────┘
         REST /api│                       WS /ws/*│
 ┌───────────────▼──────────────────────────────▼───────────────┐
 │  FastAPI backend  (:8000)                                     │
 │                                                               │
 │  API routers ─ system · datasets · runs · registry · advisor  │
-│                · eval                                          │
+│                · eval · serving                                │
 │                                                               │
-│  Core ─ JobQueue (1 GPU job at a time) ─ Runner (subprocess)  │
-│         EvalManager (playground + eval) ─ WSHub ─ Poller      │
+│  Core ─ GPU lease + JobQueue ─ Runner (subprocess)             │
+│         Eval/Deployment managers ─ activity tracing ─ WSHub    │
 │                                                               │
 │  Integrations ─ llmfit(+estimator) · hf_hub · gguf · judge    │
 │  Backends ─ TrainingBackend: unsloth · scratch (Axolotl/…)    │
@@ -45,6 +45,19 @@ line, saves what matters, and rebroadcasts it to the browser over WebSocket.
 Heavy imports (`torch`, `unsloth`, `transformers`) live **inside** the
 subprocess entrypoints, so the API process itself starts instantly and runs on
 machines with no CUDA.
+
+## One model reference, three runtime formats
+
+`model_refs.py` gives each completed run a stable `run:<id>` reference and
+classifies its output as a full Transformers model, PEFT adapter, or SLM Kit
+scratch checkpoint. `train_entry/model_runtime.py` is the shared heavy loader
+used by generation, evaluation, and deployment, so those product surfaces do
+not implement different compatibility rules.
+
+The managed deployment is another isolated subprocess
+(`train_entry/serve.py`). It exposes OpenAI-compatible chat/completions on port
+8802. `core/deployment.py`, the training queue, and EvalManager coordinate
+ownership so only one long-lived GPU workload is active at a time.
 
 ## Single-GPU safety
 
@@ -88,8 +101,9 @@ class TrainingBackend(Protocol):
     def run(cfg, ctx) -> Iterator[TrainingEvent]        # heavy, subprocess-side
 ```
 
-Two are built in:
+Three are built in:
 - **`unsloth`** — LoRA/QLoRA/DoRA/full + continued pretraining (via TRL's SFTTrainer).
+- **`transformers`** — broad Transformers + TRL + PEFT compatibility fallback.
 - **`scratch`** — from-scratch GPT + custom BPE tokenizer, pure PyTorch.
 
 Adding **Axolotl** or **LlamaFactory** later means writing one class with these
@@ -100,8 +114,10 @@ stay import-light (no torch at module load) so the API can call them.
 
 A `RunConfig` (see [domain.py](../backend/app/domain.py)) fully describes a run:
 backend, task, method, base model, dataset, LoRA params, optimizer, training
-schedule, and (for pretraining) the architecture. It's stored verbatim on the
-`Run` row, which is why any run can be **re-run** or **exported** exactly.
+schedule, and (for pretraining) the architecture. The effective config also
+captures the model revision, dataset SHA-256 fingerprint, seed, platform and
+installed training-library versions. It is stored on the `Run` row, which is
+why any run can be **re-run**, cloned, compared, or exported.
 
 ## Data model (SQLite via SQLModel)
 

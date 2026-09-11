@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from statistics import mean
-from typing import Optional
 
 
 def _norm(s: str) -> str:
@@ -22,7 +21,7 @@ def _norm(s: str) -> str:
 def exact_match(preds: list[str], refs: list[str]) -> float:
     if not preds:
         return 0.0
-    return mean(1.0 if _norm(p) == _norm(r) else 0.0 for p, r in zip(preds, refs))
+    return mean(1.0 if _norm(p) == _norm(r) else 0.0 for p, r in zip(preds, refs, strict=True))
 
 
 def token_f1(preds: list[str], refs: list[str]) -> float:
@@ -44,20 +43,20 @@ def token_f1(preds: list[str], refs: list[str]) -> float:
 
     if not preds:
         return 0.0
-    return mean(f1(p, r) for p, r in zip(preds, refs))
+    return mean(f1(p, r) for p, r in zip(preds, refs, strict=True))
 
 
-def rouge_l(preds: list[str], refs: list[str]) -> Optional[float]:
+def rouge_l(preds: list[str], refs: list[str]) -> float | None:
     try:
         from rouge_score import rouge_scorer
     except Exception:
         return None
     scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
-    scores = [scorer.score(r, p)["rougeL"].fmeasure for p, r in zip(preds, refs)]
+    scores = [scorer.score(r, p)["rougeL"].fmeasure for p, r in zip(preds, refs, strict=True)]
     return mean(scores) if scores else 0.0
 
 
-def bleu(preds: list[str], refs: list[str]) -> Optional[float]:
+def bleu(preds: list[str], refs: list[str]) -> float | None:
     try:
         import sacrebleu
     except Exception:

@@ -23,6 +23,7 @@ RTX 4060 with 8 GB VRAM and 16 GB RAM). Every default is chosen so it *fits*.
 | Copy-paste common commands | [Commands cheat-sheet](commands.md) |
 | Understand how it works inside | [Architecture](architecture.md) |
 | Call the backend directly | [API reference](api-reference.md) |
+| Serve a trained model locally | [Local deployment](deployment.md) |
 | Fix a problem | [Troubleshooting](troubleshooting.md) |
 
 ## Page-by-page guides (the 8 screens of the app)

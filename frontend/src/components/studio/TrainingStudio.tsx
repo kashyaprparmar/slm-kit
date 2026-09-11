@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Rocket, Sparkles, XCircle, AlertTriangle, Info } from "lucide-react";
 import { toast } from "sonner";
@@ -19,6 +20,9 @@ import { FitIndicator } from "@/components/FitIndicator";
 import { RunMonitor } from "@/components/RunMonitor";
 import { SCHEDULERS, OPTIMIZERS } from "@/lib/constants";
 import { defaultForm, toPayload, type RunForm } from "@/lib/runconfig";
+import { useWorkflow } from "@/lib/workflow";
+import { ErrorPanel } from "@/components/ErrorPanel";
+import { SettingsRecommendations } from "./SettingsRecommendations";
 import { useDebouncedValue } from "@/lib/hooks";
 import type { DatasetKind, TaskType, ValidationReport } from "@/lib/types";
 
@@ -36,9 +40,15 @@ export function TrainingStudio({
   task, title, description, datasetKinds, defaultOutputName, note,
 }: TrainingStudioProps) {
   const qc = useQueryClient();
-  const [form, setForm] = useState<RunForm>(defaultForm({ task, output_name: defaultOutputName }));
-  const [launchedRunId, setLaunchedRunId] = useState<number | null>(null);
+  const [search] = useSearchParams();
+  const [form, setForm] = useWorkflow<RunForm>(`training.${task}`, defaultForm({ task, output_name: defaultOutputName }));
+  const [launchedRunId, setLaunchedRunId] = useWorkflow<number | null>(`training.${task}.run`, null, false);
   const set = <K extends keyof RunForm>(k: K, v: RunForm[K]) => setForm((f) => ({ ...f, [k]: v }));
+
+  useEffect(() => {
+    const requested = search.get("model");
+    if (requested) setForm((current) => current.base_model === requested ? current : { ...current, base_model: requested });
+  }, [search, setForm]);
 
   const payload = useMemo(() => toPayload(form), [form]);
   const debounced = useDebouncedValue(JSON.stringify(payload), 450);
@@ -48,6 +58,7 @@ export function TrainingStudio({
     queryFn: () => api.estimate(JSON.parse(debounced)),
     enabled: !!form.base_model.trim(),
   });
+  const backends = useQuery({ queryKey: ["training-backends"], queryFn: api.backends, staleTime: 60_000 });
 
   const launch = useMutation({
     mutationFn: () => api.createRun(payload),
@@ -58,13 +69,13 @@ export function TrainingStudio({
     },
     onError: (err) => {
       if (err instanceof ApiError && err.status === 422) toast.error("Config failed validation — see the fit panel.");
-      else toast.error("Could not launch run");
+      else toast.error(err instanceof Error ? err.message : "Could not launch run");
     },
   });
 
   const report: ValidationReport | undefined = estimate.data?.validation;
   const canLaunch =
-    !!form.base_model.trim() && form.dataset_id != null && (report?.ok ?? false) && !launch.isPending;
+    !!form.base_model.trim() && form.dataset_id != null && (report?.ok ?? false) && !launch.isPending && debounced === JSON.stringify(payload) && !estimate.isFetching;
 
   return (
     <div className="space-y-6">
@@ -89,8 +100,16 @@ export function TrainingStudio({
           <Card>
             <CardHeader><CardTitle>Base model & data</CardTitle></CardHeader>
             <CardContent className="space-y-4">
-              <BaseModelPicker value={form.base_model} onChange={(v) => set("base_model", v)} />
+              <Field label="Training engine" hint="Unsloth is optimized for supported GPUs; Transformers is the broad compatibility fallback.">
+                <Select value={form.backend} onChange={(e) => set("backend", e.target.value)}>
+                  {(backends.data ?? [{ name: "unsloth" }, { name: "transformers" }]).filter((item) => item.name !== "scratch").map((item) => (
+                    <option key={item.name} value={item.name}>{item.name === "unsloth" ? "Unsloth — optimized" : "Transformers + PEFT — compatible"}</option>
+                  ))}
+                </Select>
+              </Field>
+              <BaseModelPicker value={form.base_model} revision={form.revision} onChange={(v) => set("base_model", v)} />
               <DatasetPicker value={form.dataset_id} onChange={(id) => set("dataset_id", id)} kinds={datasetKinds} />
+              <Field label="Model revision" hint="Optional Hugging Face branch, tag or commit hash. Pin a commit for reproducibility."><Input value={form.revision ?? ""} onChange={e => set("revision", e.target.value)} placeholder="main" /></Field>
               <Field label="Output name" hint="Used for the local artifact and default HF repo name.">
                 <Input value={form.output_name} onChange={(e) => set("output_name", e.target.value)} />
               </Field>
@@ -103,15 +122,16 @@ export function TrainingStudio({
           </Card>
 
           <Card>
-            <CardHeader><CardTitle>Hyperparameters</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Training settings</CardTitle></CardHeader>
             <CardContent className="space-y-4">
+              <SettingsRecommendations form={form} onApply={setForm} />
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
                 <NumberField label="Epochs" value={form.epochs} step={0.5} min={0} onChange={(v) => set("epochs", v ?? 1)} />
-                <NumberField label="Max steps" value={form.max_steps} min={0} hint="overrides epochs" onChange={(v) => set("max_steps", v)} />
-                <NumberField label="Learning rate" value={form.learning_rate} step={0.00001} onChange={(v) => set("learning_rate", v ?? 2e-4)} />
-                <NumberField label="Batch size" value={form.per_device_batch_size} min={1} onChange={(v) => set("per_device_batch_size", v ?? 2)} />
-                <NumberField label="Grad accum" value={form.gradient_accumulation} min={1} onChange={(v) => set("gradient_accumulation", v ?? 4)} />
-                <NumberField label="Max seq length" value={form.max_seq_length} step={128} min={128} onChange={(v) => set("max_seq_length", v ?? 1024)} />
+                <NumberField label="Max steps" value={form.max_steps} min={1} hint="Optional step limit; overrides epochs." onChange={(v) => set("max_steps", v)} />
+                <NumberField label="Learning Rate" hint="How quickly the model learns. Lower values are safer." value={form.learning_rate} step={0.00001} onChange={(v) => set("learning_rate", v ?? 2e-4)} />
+                <NumberField label="Batch Size" hint="Examples processed by the GPU at once." value={form.per_device_batch_size} min={1} onChange={(v) => set("per_device_batch_size", v ?? 2)} />
+                <NumberField label="Batch Accumulation" hint="Combines small batches before updating the model." value={form.gradient_accumulation} min={1} onChange={(v) => set("gradient_accumulation", v ?? 4)} />
+                <NumberField label="Context Length" hint="Maximum tokens used from each example." value={form.max_seq_length} step={128} min={128} onChange={(v) => set("max_seq_length", v ?? 1024)} />
               </div>
 
               <Collapsible title="Advanced (LoRA, scheduler, optimizer, checkpointing)">
@@ -123,6 +143,8 @@ export function TrainingStudio({
                       <NumberField label="LoRA dropout" value={form.dropout} step={0.01} min={0} max={1} onChange={(v) => set("dropout", v ?? 0)} />
                     </>
                   )}
+                  <NumberField label="Random Seed" value={form.seed ?? 42} min={0} hint="Keeps data shuffling and initialization repeatable." onChange={v => set("seed", v ?? 42)} />
+                  <label className="text-xs"><input type="checkbox" checked={form.gradient_checkpointing ?? true} onChange={e => set("gradient_checkpointing", e.target.checked)} /> Gradient checkpointing — trades speed for lower memory</label>
                   <NumberField label="Warmup ratio" value={form.warmup_ratio} step={0.01} min={0} max={1} onChange={(v) => set("warmup_ratio", v ?? 0.03)} />
                   <Field label="LR scheduler">
                     <Select value={form.lr_scheduler} onChange={(e) => set("lr_scheduler", e.target.value)}>
@@ -149,7 +171,7 @@ export function TrainingStudio({
               <Badge variant="neutral">{form.method.toUpperCase()}</Badge>
             </CardHeader>
             <CardContent className="space-y-3">
-              {estimate.isFetching && !estimate.data ? (
+              {estimate.error ? <ErrorPanel error={estimate.error} retry={() => estimate.refetch()} /> : estimate.isFetching && !estimate.data ? (
                 <Skeleton className="h-40" />
               ) : estimate.data ? (
                 <>
@@ -161,7 +183,7 @@ export function TrainingStudio({
               )}
 
               <Button className="w-full" size="lg" disabled={!canLaunch} onClick={() => launch.mutate()}>
-                <Rocket /> {launch.isPending ? "Launching…" : "Launch run"}
+                <Rocket /> {launch.isPending ? "Launching…" : "Start Training"}
               </Button>
               {form.dataset_id == null && (
                 <p className="text-center text-[11px] text-muted-foreground">Select a dataset to enable launch.</p>

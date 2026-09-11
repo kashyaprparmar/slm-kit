@@ -8,6 +8,7 @@ feedback *before* a run is launched — with line numbers where possible.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,12 @@ class DatasetStats:
     size_bytes: int = 0
     sample_rows: list = field(default_factory=list)
     token_histogram: list[int] = field(default_factory=list)  # per-row token estimate
+    columns: list[str] = field(default_factory=list)
+    duplicate_rows: int = 0
+    empty_rows: int = 0
+    invalid_rows: int = 0
+    long_rows: int = 0
+    fingerprint: str = ""
 
 
 def detect_format(path: str | Path) -> str:
@@ -44,8 +51,9 @@ def estimate_tokens(text: str) -> int:
 
 
 def _extract_text(row: dict) -> str:
+    row = normalize_row(row)
     if "messages" in row and isinstance(row["messages"], list):
-        return " ".join(str(m.get("content", "")) for m in row["messages"])
+        return " ".join(str(m.get("content", "")) for m in row["messages"] if isinstance(m, dict))
     keys = ("instruction", "input", "context", "prompt", "question",
             "output", "response", "answer", "text")
     return " ".join(str(row.get(k, "")) for k in keys if row.get(k))
@@ -53,6 +61,7 @@ def _extract_text(row: dict) -> str:
 
 def _validate_instruction_row(row: dict) -> str | None:
     """Return an error string if the row isn't a usable instruction/chat example."""
+    row = normalize_row(row)
     if "messages" in row:
         msgs = row["messages"]
         if not isinstance(msgs, list) or not msgs:
@@ -60,6 +69,10 @@ def _validate_instruction_row(row: dict) -> str | None:
         for m in msgs:
             if not isinstance(m, dict) or "role" not in m or "content" not in m:
                 return "each message needs 'role' and 'content'"
+            if m["role"] not in {"system", "user", "assistant", "tool"} or not isinstance(m["content"], str) or not m["content"].strip():
+                return "messages need a valid role and non-empty text content"
+        if not any(m["role"] == "assistant" for m in msgs):
+            return "chat data needs an assistant response to learn from"
         return None
     has_prompt = any(row.get(k) for k in ("instruction", "prompt", "question"))
     has_answer = any(row.get(k) for k in ("output", "response", "answer"))
@@ -80,6 +93,8 @@ def validate(path: str | Path, kind: DatasetKind) -> tuple[ValidationReport, Dat
         report.error(f"File not found: {path}")
         return report, stats
     stats.size_bytes = path.stat().st_size
+    with path.open("rb") as stream:
+        stats.fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()
     if stats.size_bytes == 0:
         report.error("File is empty.")
         return report, stats
@@ -94,23 +109,39 @@ def validate(path: str | Path, kind: DatasetKind) -> tuple[ValidationReport, Dat
             )
             return report, stats
 
-    if kind in (DatasetKind.PRETRAIN_CORPUS, DatasetKind.DOMAIN_CORPUS):
-        _validate_corpus(path, kind, report, stats)
-    else:
-        _validate_records(path, fmt, kind, report, stats)
+    try:
+        if kind in (DatasetKind.PRETRAIN_CORPUS, DatasetKind.DOMAIN_CORPUS):
+            _validate_corpus(path, kind, report, stats)
+        else:
+            _validate_records(path, fmt, kind, report, stats)
+    except (ValueError, TypeError, OSError) as exc:
+        report.error(f"Could not read dataset: {exc}")
 
     return report, stats
 
 
 def _validate_corpus(path: Path, kind: DatasetKind, report: ValidationReport, stats: DatasetStats) -> None:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if not text.strip():
+    for line, row in _iter_records(path, stats.fmt):
+        if not isinstance(row, dict):
+            report.error("Invalid corpus row.", line=line)
+            stats.invalid_rows += 1
+            if stats.invalid_rows >= 20:
+                break
+            continue
+        text = _extract_text(row)
+        if not text.strip():
+            stats.empty_rows += 1
+            continue
+        stats.num_rows += 1
+        stats.num_tokens_est += estimate_tokens(text)
+        if len(stats.sample_rows) < 10:
+            stats.sample_rows.append(text)
+        if len(stats.token_histogram) < 500:
+            stats.token_histogram.append(estimate_tokens(text))
+        stats.columns = list(dict.fromkeys([*stats.columns, *row.keys()]))
+    if not stats.num_rows:
         report.error("Corpus contains only whitespace.")
         return
-    stats.num_rows = text.count("\n") + 1
-    stats.num_tokens_est = estimate_tokens(text)
-    stats.sample_rows = [ln for ln in text.splitlines()[:20] if ln.strip()][:10]
-    stats.token_histogram = [estimate_tokens(ln) for ln in text.splitlines()[:500] if ln.strip()]
 
     threshold = MIN_PRETRAIN_TOKENS if kind == DatasetKind.PRETRAIN_CORPUS else MIN_DOMAIN_TOKENS
     if stats.num_tokens_est < threshold:
@@ -134,7 +165,9 @@ def _iter_records(path: Path, fmt: str):
                     yield i, e
     elif fmt == "json":
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        rows = data if isinstance(data, list) else data.get("data", [])
+        rows = data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
+        if not isinstance(rows, list):
+            raise ValueError("JSON must contain an array of records, or a 'data' array.")
         for i, row in enumerate(rows, start=1):
             yield i, row
     elif fmt == "csv":
@@ -142,10 +175,13 @@ def _iter_records(path: Path, fmt: str):
             for i, row in enumerate(csv.DictReader(f), start=1):
                 yield i, dict(row)
     elif fmt == "parquet":
-        import pyarrow.parquet as pq  # noqa: PLC0415 — optional dep, guarded in validate()
+        import pyarrow.parquet as pq
 
-        for i, row in enumerate(pq.read_table(path).to_pylist(), start=1):
-            yield i, row
+        i = 0
+        for batch in pq.ParquetFile(path).iter_batches(batch_size=1024):
+            for row in batch.to_pylist():
+                i += 1
+                yield i, row
     else:  # txt fallback: each line a record with a 'text' field
         with path.open(encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f, start=1):
@@ -170,15 +206,23 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
             report.error("Row is not an object.", line=lineno)
             errors += 1
             continue
+        stats.columns = list(dict.fromkeys([*stats.columns, *row.keys()]))
+        row = normalize_row(row)
 
         if kind == DatasetKind.INSTRUCTION or kind == DatasetKind.EVAL:
             err = _validate_instruction_row(row)
             if err and errors < 20:
                 report.error(err, line=lineno)
                 errors += 1
+            if err:
+                stats.invalid_rows += 1
 
         text = _extract_text(row)
         toks = estimate_tokens(text)
+        if not text.strip():
+            stats.empty_rows += 1
+        if toks > 4096:
+            stats.long_rows += 1
         stats.num_rows += 1
         stats.num_tokens_est += toks
         if len(stats.token_histogram) < 500:
@@ -186,7 +230,7 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
         if len(stats.sample_rows) < 10:
             stats.sample_rows.append(row)
 
-        key = text.strip()[:200]
+        key = hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if key in seen:
             duplicates += 1
         else:
@@ -197,6 +241,11 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
         return
     if duplicates:
         report.warn(f"{duplicates} duplicate/near-duplicate rows detected.")
+    stats.duplicate_rows = duplicates
+    if stats.empty_rows:
+        report.warn(f"{stats.empty_rows} empty rows detected.")
+    if stats.long_rows:
+        report.warn(f"{stats.long_rows} rows exceed ~4,096 estimated tokens; consider truncation or splitting.")
     if kind == DatasetKind.INSTRUCTION:
         if stats.num_rows < MIN_INSTRUCTION_ROWS:
             report.warn(
@@ -206,3 +255,15 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
         elif stats.num_rows < GOOD_INSTRUCTION_ROWS:
             report.info(f"{stats.num_rows} examples — workable; {GOOD_INSTRUCTION_ROWS}+ is better.")
     report.info(f"{stats.num_rows:,} rows, ~{stats.num_tokens_est:,} estimated tokens.")
+
+
+def normalize_row(row: dict, columns: dict | None = None) -> dict:
+    if columns:
+        return {target: row.get(source, "") for target, source in columns.items() if source}
+    conversations = row.get("conversations")
+    if isinstance(conversations, list):
+        roles = {"human": "user", "gpt": "assistant", "system": "system", "user": "user", "assistant": "assistant"}
+        return {"messages": [{"role": roles.get(m.get("from", m.get("role")), "unknown"),
+                              "content": m.get("value", m.get("content", ""))}
+                             if isinstance(m, dict) else {} for m in conversations]}
+    return row

@@ -1,7 +1,7 @@
 # Model Registry
 
 Your locally-trained artifacts **and** your Hugging Face repos, in one place.
-Publish, import, and export to GGUF from here.
+Publish, import, export to GGUF, and deploy a local OpenAI-compatible endpoint from here.
 
 ## Capability banner
 
@@ -14,7 +14,11 @@ See [Configuration](../configuration.md) to enable either.
 ## Left side — "Trained here"
 
 ### Ready to publish
-Finished runs that aren't published yet. Each has two actions:
+Finished runs expose a stable `run:<id>` reference that is also available in
+the Eval Lab model picker. Each has these actions:
+
+- **Deploy** starts an isolated local server on `http://localhost:8802/v1`.
+  The deployment card shows the active model and provides copy/stop controls.
 
 - **Publish** → opens a dialog:
   - **Repo id** (e.g. `yourname/finance-qlora`) — use `username/name` to target

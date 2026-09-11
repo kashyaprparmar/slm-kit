@@ -88,7 +88,7 @@ class ScratchBackend:
         )
 
     def run(self, cfg: RunConfig, ctx: RunContext) -> Iterator[TrainingEvent]:
-        events: "queue.Queue" = queue.Queue()
+        events: queue.Queue = queue.Queue()
         holder: dict = {}
         worker = threading.Thread(target=self._worker, args=(cfg, ctx, events, holder), daemon=True)
         worker.start()
@@ -101,7 +101,7 @@ class ScratchBackend:
         if "exc" in holder:
             raise holder["exc"]
 
-    def _worker(self, cfg: RunConfig, ctx: RunContext, out: "queue.Queue", holder: dict) -> None:
+    def _worker(self, cfg: RunConfig, ctx: RunContext, out: queue.Queue, holder: dict) -> None:
         try:
             self._train(cfg, ctx, out.put)
         except Exception as exc:  # noqa: BLE001 — propagated to run() via holder
@@ -115,6 +115,9 @@ class ScratchBackend:
 
         arch = cfg.arch or ScratchArch()
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        torch.manual_seed(cfg.train.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.train.seed)
         emit(LogEvent(message=f"Pretraining on {device}; arch={arch.n_layers}L/{arch.n_embd}d/{arch.block_size}ctx"))
 
         corpus = self._read_corpus(cfg, emit)
@@ -188,8 +191,11 @@ class ScratchBackend:
             row = db.get(Dataset, cfg.dataset_id)
         if row is None:
             raise ValueError(f"Dataset {cfg.dataset_id} not found.")
-        with open(row.path, encoding="utf-8", errors="replace") as f:
-            return f.read()
+        from pathlib import Path
+
+        from app.datasets.validate import _extract_text, _iter_records
+        return "\n".join(_extract_text(record) for _, record in _iter_records(Path(row.path), row.fmt)
+                         if isinstance(record, dict))
 
     def _train_tokenizer(self, corpus: str, arch: ScratchArch, ctx: RunContext, emit):
         from tokenizers import ByteLevelBPETokenizer
@@ -235,7 +241,7 @@ class ScratchBackend:
 # --------------------------------------------------------------------------- #
 def _make_gpt_classes():
     import torch
-    import torch.nn as nn
+    from torch import nn
     from torch.nn import functional as F
 
     class Block(nn.Module):

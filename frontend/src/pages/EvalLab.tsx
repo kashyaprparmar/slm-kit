@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useWorkflow } from "@/lib/workflow";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageSquare, FlaskConical, Zap, X } from "lucide-react";
 import { toast } from "sonner";
@@ -10,7 +12,9 @@ import { Playground } from "@/components/eval/Playground";
 import { EvalHarness } from "@/components/eval/EvalHarness";
 
 export default function EvalLab() {
-  const [tab, setTab] = useState("playground");
+  const [params] = useSearchParams();
+  const [tab, setTab] = useWorkflow("eval.tab", params.get("tab") || "playground");
+  useEffect(() => { if (params.get("tab")) setTab(params.get("tab")!); }, [params, setTab]);
   const qc = useQueryClient();
   const status = useQuery({ queryKey: ["eval-status"], queryFn: api.evalStatus, refetchInterval: 4000 });
 
@@ -35,7 +39,7 @@ export default function EvalLab() {
     <div className="space-y-6">
       <PageHeader
         title="Model Testing & Eval Lab"
-        description="Chat with, and rigorously evaluate, any model — trained here or straight from Hugging Face."
+        description="Chat with, and rigorously evaluate, compatible models — trained here, local, or from Hugging Face."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {status.data?.busy && (

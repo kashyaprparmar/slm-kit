@@ -14,6 +14,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 
 from app.backends.base import RunContext
 from app.core.events import (
@@ -32,8 +33,29 @@ from app.domain import (
     TaskType,
     ValidationReport,
 )
+from app.model_refs import ModelReferenceError, resolve_model_ref
 
 _SENTINEL = object()
+_UNSLOTH_DEFAULT_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
+
+def _unsloth_target_modules(requested: list[str]) -> list[str]:
+    """Return the explicit projection list Unsloth expects.
+
+    PEFT accepts the convenient ``all-linear`` string, while Unsloth's loader
+    expects a sequence and treats that string as individual characters. Empty
+    SLM Kit configuration means automatic all-linear targeting, so map it to
+    Unsloth's documented default projections instead.
+    """
+    return list(requested) if requested else list(_UNSLOTH_DEFAULT_TARGET_MODULES)
 
 
 class UnslothBackend:
@@ -45,11 +67,21 @@ class UnslothBackend:
     def validate_config(self, cfg: RunConfig, hw: HardwareProfile) -> ValidationReport:
         report = ValidationReport()
         if cfg.task not in self.supported_tasks:
-            report.error(f"Unsloth backend does not support task '{cfg.task.value}'.")
+            report.error(f"{self.name} backend does not support task '{cfg.task.value}'.")
         if cfg.method not in self.supported_methods:
-            report.error(f"Unsloth backend does not support method '{cfg.method.value}'.")
+            report.error(f"{self.name} backend does not support method '{cfg.method.value}'.")
         if not cfg.base_model:
             report.error("A base model (HF repo id or local path) is required.")
+        else:
+            try:
+                resolved = resolve_model_ref(cfg.base_model)
+                if resolved.kind == "scratch":
+                    report.error(
+                        "Scratch checkpoints can be evaluated and deployed, but cannot be fine-tuned by the "
+                        "Hugging Face trainer. Start a new scratch pretraining run instead."
+                    )
+            except ModelReferenceError as exc:
+                report.error(str(exc))
         if cfg.method == Method.QLORA and not cfg.load_in_4bit:
             report.warn("QLoRA selected but load_in_4bit is off — enabling 4-bit is recommended on 8GB.")
 
@@ -64,6 +96,8 @@ class UnslothBackend:
 
         if cfg.method == Method.FULL:
             report.warn("Full fine-tuning is only viable for very small models on 8GB VRAM.")
+        if cfg.method == Method.QLORA and not hw.gpu_name:
+            report.error("QLoRA requires a detected CUDA GPU. Use a GPU-enabled environment.")
         return report
 
     def estimate_footprint(self, cfg: RunConfig, hw: HardwareProfile) -> MemoryEstimate:
@@ -81,7 +115,7 @@ class UnslothBackend:
 
     # ---- training (runs in subprocess) --------------------------------
     def run(self, cfg: RunConfig, ctx: RunContext) -> Iterator[TrainingEvent]:
-        events: "queue.Queue" = queue.Queue()
+        events: queue.Queue = queue.Queue()
         holder: dict = {}
 
         worker = threading.Thread(
@@ -102,7 +136,7 @@ class UnslothBackend:
             raise holder["exc"]
 
     # -------------------------------------------------------------------
-    def _train_worker(self, cfg: RunConfig, ctx: RunContext, out: "queue.Queue", holder: dict) -> None:
+    def _train_worker(self, cfg: RunConfig, ctx: RunContext, out: queue.Queue, holder: dict) -> None:
         def emit(ev: TrainingEvent) -> None:
             out.put(ev)
 
@@ -115,31 +149,8 @@ class UnslothBackend:
             out.put(_SENTINEL)
 
     def _train(self, cfg: RunConfig, ctx: RunContext, emit) -> None:
+        model, tokenizer = self._load_trainable_model(cfg, emit)
         import torch
-        from unsloth import FastLanguageModel
-
-        emit(LogEvent(message=f"Loading base model {cfg.base_model} (4bit={cfg.load_in_4bit})…"))
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=cfg.base_model,
-            max_seq_length=cfg.train.max_seq_length,
-            dtype=None,  # auto: bf16 on Ampere+, else fp16
-            load_in_4bit=cfg.load_in_4bit and cfg.method != Method.FULL,
-        )
-
-        if cfg.method != Method.FULL:
-            emit(LogEvent(message=f"Attaching {cfg.method.value.upper()} adapters (r={cfg.lora.r})…"))
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=cfg.lora.r,
-                target_modules=cfg.lora.target_modules,
-                lora_alpha=cfg.lora.alpha,
-                lora_dropout=cfg.lora.dropout,
-                bias="none",
-                use_gradient_checkpointing="unsloth",
-                random_state=cfg.train.seed,
-                use_rslora=cfg.lora.use_rslora,
-                use_dora=(cfg.method == Method.DORA) or cfg.lora.use_dora,
-            )
 
         dataset = self._load_dataset(cfg, tokenizer, emit)
 
@@ -163,8 +174,8 @@ class UnslothBackend:
             save_steps=cfg.train.save_steps,
             save_strategy="steps",
             seed=cfg.train.seed,
-            bf16=torch.cuda.is_bf16_supported(),
-            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+            fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
             dataset_text_field="text",
             packing=cfg.train.packing,
             report_to="none",
@@ -198,14 +209,185 @@ class UnslothBackend:
         emit(CheckpointEvent(step=callback.last_step, path=str(final_dir), is_final=True))
         emit(LogEvent(message=f"Saved final model to {final_dir}"))
 
+    def _load_trainable_model(self, cfg: RunConfig, emit):
+        """Load any causal-LM checkpoint, preferring Unsloth where it fits.
+
+        The fallback matters for practical interoperability: a standard Hugging
+        Face decoder-only model should remain trainable even if Unsloth has not
+        implemented an optimized wrapper for that architecture.
+        """
+        import torch
+
+        from app.config import get_settings
+        from app.integrations.hf_hub import _token
+        settings = get_settings()
+        common = {"token": _token(), "cache_dir": str(settings.hf_cache_dir),
+                  "trust_remote_code": settings.trust_remote_code}
+        if cfg.revision:
+            common["revision"] = cfg.revision
+
+        # Unsloth must patch Transformers before either Transformers or PEFT is
+        # imported. Remote adapter detection below uses PEFT, so importing here
+        # prevents that lightweight probe from silently disabling the optimized
+        # Qwen/Llama model loaders.
+        fast_language_model = None
+        unsloth_import_error = None
+        if cfg.backend != "transformers" and cfg.method != Method.FULL:
+            try:
+                from unsloth import FastLanguageModel
+
+                fast_language_model = FastLanguageModel
+            except Exception as exc:  # surfaced through the normal fallback log
+                unsloth_import_error = exc
+
+        resolved = resolve_model_ref(cfg.base_model)
+        if resolved.kind == "transformers" and resolved.local_path is None:
+            try:
+                from peft import PeftConfig
+
+                adapter_cfg = PeftConfig.from_pretrained(
+                    resolved.load_ref,
+                    token=_token(),
+                    cache_dir=str(settings.hf_cache_dir),
+                    revision=cfg.revision,
+                )
+                adapter_base = getattr(adapter_cfg, "base_model_name_or_path", None)
+                if adapter_base:
+                    resolved = replace(
+                        resolved,
+                        kind="adapter",
+                        base_model=str(adapter_base),
+                        adapter_path=resolved.load_ref,
+                    )
+            except Exception:
+                pass
+        if resolved.kind == "scratch":
+            raise ValueError("Scratch checkpoints are not supported by the Hugging Face fine-tuning backend.")
+        model_ref = resolved.load_ref
+        emit(LogEvent(message=f"Loading base model {cfg.base_model} (4bit={cfg.load_in_4bit})..."))
+        try:
+            if cfg.backend == "transformers" or cfg.method == Method.FULL or resolved.kind == "adapter":
+                raise NotImplementedError("Using the standard Transformers engine for this configuration.")
+            if unsloth_import_error is not None:
+                raise unsloth_import_error
+            if fast_language_model is None:
+                raise RuntimeError("Unsloth did not provide FastLanguageModel.")
+
+            model, tokenizer = fast_language_model.from_pretrained(
+                model_name=model_ref,
+                max_seq_length=cfg.train.max_seq_length,
+                dtype=None,
+                load_in_4bit=cfg.load_in_4bit and cfg.method != Method.FULL,
+                **common,
+            )
+            if cfg.method != Method.FULL:
+                emit(LogEvent(message=f"Attaching {cfg.method.value.upper()} adapters with Unsloth (r={cfg.lora.r})..."))
+                model = fast_language_model.get_peft_model(
+                    model,
+                    r=cfg.lora.r,
+                    target_modules=_unsloth_target_modules(cfg.lora.target_modules),
+                    lora_alpha=cfg.lora.alpha,
+                    lora_dropout=cfg.lora.dropout,
+                    bias="none",
+                    use_gradient_checkpointing="unsloth" if cfg.gradient_checkpointing else False,
+                    random_state=cfg.train.seed,
+                    use_rslora=cfg.lora.use_rslora,
+                    use_dora=(cfg.method == Method.DORA) or cfg.lora.use_dora,
+                )
+            return model, tokenizer
+        except Exception as unsloth_error:
+            if "out of memory" in str(unsloth_error).lower():
+                raise
+            emit(LogEvent(
+                level="warning",
+                message=f"Unsloth could not load this model ({unsloth_error}). Falling back to Transformers + PEFT.",
+            ))
+
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+        from app.config import get_settings
+
+        adapter_common = common
+        base_common = dict(common)
+        if resolved.kind == "adapter":
+            # The selected revision belongs to the adapter repository, not
+            # necessarily to its independently-versioned base model.
+            base_common.pop("revision", None)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(resolved.adapter_path or model_ref, **adapter_common)
+        except (OSError, ValueError):
+            if resolved.kind != "adapter" or not resolved.base_model:
+                raise
+            emit(LogEvent(level="warning", message="Adapter has no tokenizer files; using its base model tokenizer."))
+            tokenizer = AutoTokenizer.from_pretrained(resolved.base_model, **base_common)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        load_kwargs = {"dtype": "auto", **common}
+        if torch.cuda.is_available():
+            load_kwargs["device_map"] = {"": 0}
+        if cfg.load_in_4bit and cfg.method != Method.FULL:
+            if not torch.cuda.is_available():
+                raise RuntimeError("QLoRA requires a CUDA GPU.")
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+
+        if resolved.kind == "adapter":
+            from peft import PeftModel
+
+            assert resolved.base_model and resolved.adapter_path
+            base_load_kwargs = {**load_kwargs, **base_common}
+            base_load_kwargs.pop("revision", None)
+            base = AutoModelForCausalLM.from_pretrained(resolved.base_model, **base_load_kwargs)
+            if cfg.load_in_4bit:
+                from peft import prepare_model_for_kbit_training
+                base = prepare_model_for_kbit_training(base, use_gradient_checkpointing=cfg.gradient_checkpointing)
+            model = PeftModel.from_pretrained(
+                base,
+                resolved.adapter_path,
+                is_trainable=True,
+                token=_token(),
+                revision=cfg.revision,
+            )
+            if cfg.method == Method.FULL:
+                model = model.merge_and_unload()
+                for parameter in model.parameters():
+                    parameter.requires_grad_(True)
+            else:
+                emit(LogEvent(message="Continuing existing adapter; its saved rank and target modules are retained."))
+        else:
+            model = AutoModelForCausalLM.from_pretrained(model_ref, **load_kwargs)
+
+        if cfg.method != Method.FULL and resolved.kind != "adapter":
+            from peft import LoraConfig, get_peft_model
+            from peft import TaskType as PeftTaskType
+            if cfg.load_in_4bit:
+                from peft import prepare_model_for_kbit_training
+                model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=cfg.gradient_checkpointing)
+
+            model = get_peft_model(model, LoraConfig(
+                task_type=PeftTaskType.CAUSAL_LM,
+                r=cfg.lora.r,
+                lora_alpha=cfg.lora.alpha,
+                lora_dropout=cfg.lora.dropout,
+                target_modules=cfg.lora.target_modules or "all-linear",
+                use_dora=(cfg.method == Method.DORA) or cfg.lora.use_dora,
+                use_rslora=cfg.lora.use_rslora,
+            ))
+        model.config.use_cache = False
+        if cfg.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+            if hasattr(model, "enable_input_require_grads"):
+                model.enable_input_require_grads()
+        return model, tokenizer
+
     # -------------------------------------------------------------------
     def _load_dataset(self, cfg: RunConfig, tokenizer, emit):
         """Resolve the dataset row and produce a HF Dataset with a 'text' column."""
         from datasets import load_dataset
+        from sqlmodel import Session
 
         from app.db.models import Dataset
         from app.db.session import engine
-        from sqlmodel import Session
 
         if cfg.dataset_id is None:
             raise ValueError("No dataset selected for this run.")
@@ -219,8 +401,13 @@ class UnslothBackend:
 
         if cfg.task == TaskType.CONTINUED_PRETRAIN or ds_row.kind in ("pretrain_corpus", "domain_corpus"):
             # Raw text corpus: one 'text' field per chunk/line.
-            data = load_dataset("text", data_files=path, split="train")
-            return data
+            from pathlib import Path
+
+            from datasets import Dataset as HFDataset
+
+            from app.datasets.validate import _extract_text, _iter_records
+            return HFDataset.from_generator(lambda: ({"text": _extract_text(row)}
+                for _, row in _iter_records(Path(path), ds_row.fmt) if isinstance(row, dict)))
 
         # Instruction/chat: build a 'text' column via the model's chat template.
         if ds_row.fmt in ("jsonl", "json"):
@@ -240,6 +427,8 @@ class UnslothBackend:
 
 def _format_example(ex: dict, tokenizer) -> str:
     """Turn a variety of common instruction schemas into a single training string."""
+    from app.datasets.validate import normalize_row
+    ex = normalize_row(ex)
     if "messages" in ex and isinstance(ex["messages"], list):
         messages = ex["messages"]
     else:
@@ -283,14 +472,21 @@ class _StreamCallback:
             return control
         self.last_step = int(state.global_step)
         metrics = {k: v for k, v in logs.items() if isinstance(v, (int, float))}
+        import torch
+        metrics["elapsed_seconds"] = round(time.time() - self._t0, 1)
+        if torch.cuda.is_available():
+            metrics["vram_mb"] = round(torch.cuda.memory_allocated() / 1024**2, 1)
+            metrics["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 1024**2, 1)
         elapsed = max(1e-6, time.time() - self._t0)
         done = max(1, state.global_step)
-        if "tokens_per_sec" not in metrics:
+        if "num_tokens" in metrics:
+            metrics["tokens_per_sec"] = round(metrics["num_tokens"] / elapsed, 1)
+        else:
             # Approximate throughput: steps × effective batch × seq length.
             # (trl renamed max_seq_length → max_length; check both.)
             seq_len = getattr(args, "max_length", None) or getattr(args, "max_seq_length", None) or 1024
             eff_batch = args.per_device_train_batch_size * args.gradient_accumulation_steps
-            metrics["tokens_per_sec"] = round(done * eff_batch * seq_len / elapsed, 1)
+            metrics["estimated_tokens_per_sec"] = round(done * eff_batch * seq_len / elapsed, 1)
         if state.max_steps:
             eta = elapsed / done * (state.max_steps - done)
             metrics["eta_seconds"] = round(eta, 1)

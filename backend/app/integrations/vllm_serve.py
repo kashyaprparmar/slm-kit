@@ -29,7 +29,7 @@ import importlib.util
 import json
 import sys
 import time
-from typing import AsyncIterator, Callable, Optional
+from collections.abc import AsyncIterator, Callable
 
 import httpx
 
@@ -39,7 +39,7 @@ from app.core.logging_config import get_logger
 _settings = get_settings()
 log = get_logger(__name__)
 
-LogCallback = Optional[Callable[[str], None]]
+LogCallback = Callable[[str], None] | None
 
 
 def vllm_available() -> bool:
@@ -52,13 +52,13 @@ class VLLMServerManager:
 
     def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
-        self._model: Optional[str] = None
+        self._model: str | None = None
         self._lock = asyncio.Lock()
         self._last_used = 0.0
         self._idle_task: asyncio.Task | None = None
 
     @property
-    def model(self) -> Optional[str]:
+    def model(self) -> str | None:
         """The currently-loaded model, or None if no server is warm."""
         if self._proc is not None and self._proc.returncode is None:
             return self._model
@@ -90,7 +90,7 @@ class VLLMServerManager:
             asyncio.create_task(self._drain_stdout(log_cb))
             try:
                 await self._wait_healthy()
-            except Exception:
+            except BaseException:
                 await self._stop_locked()
                 raise
             self._last_used = time.time()
@@ -185,9 +185,10 @@ class VLLMServerManager:
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=10)
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except (TimeoutError, ProcessLookupError):
                 try:
                     proc.kill()
+                    await proc.wait()
                 except ProcessLookupError:
                     pass
 

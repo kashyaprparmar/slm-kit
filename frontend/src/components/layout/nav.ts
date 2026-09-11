@@ -7,6 +7,8 @@ import {
   FlaskConical,
   Library,
   History,
+  Server,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 
@@ -26,4 +28,6 @@ export const NAV: NavItem[] = [
   { to: "/eval", label: "Testing & Eval Lab", icon: FlaskConical, group: "Analysis" },
   { to: "/registry", label: "Model Registry", icon: Library, group: "Analysis" },
   { to: "/runs", label: "Run History", icon: History, group: "Analysis" },
+  { to: "/serving", label: "Model Serving", icon: Server, group: "Operations" },
+  { to: "/system", label: "System & Diagnostics", icon: Settings, group: "Operations" },
 ];

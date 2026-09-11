@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from pathlib import Path
 
 
 def append_log_line(path: Path, level: str, message: str, ts: float | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {"ts": ts if ts is not None else time.time(), "level": level, "message": message}
+    from app.core.observability import activity
+
+    source = "training" if path.parent.name.isdigit() else "worker"
+    activity.add(source, message, level, task_id=path.parent.name)
     try:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -29,7 +34,9 @@ def read_log_tail(path: Path, lines: int = 2000) -> list[dict]:
     if not path.exists():
         return []
     out: list[dict] = []
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        tail = deque(stream, maxlen=max(1, min(lines, 5000)))
+    for raw in tail:
         raw = raw.strip()
         if not raw:
             continue

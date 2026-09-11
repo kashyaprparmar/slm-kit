@@ -6,6 +6,7 @@ Recommended way to run SLM Kit. Two containers:
 |---|---|---|---|
 | `backend` | `slmkit-backend` | **8000** | FastAPI + training (GPU image) or API-only (CPU image) |
 | `frontend` | `slmkit-frontend` | **5173** | nginx (prod) or Vite (dev). Proxies `/api` and `/ws` to the backend |
+| managed model server | child of `backend` | **8802** (loopback only) | OpenAI-compatible endpoint while a model is deployed |
 
 ```
 Browser  →  http://localhost:5173
@@ -133,6 +134,13 @@ Health:
 ```powershell
 curl http://localhost:8000/api/health
 curl http://localhost:5173/api/health    # same JSON, via nginx proxy
+```
+
+After deploying a model from Model Registry:
+
+```powershell
+curl http://localhost:8802/health
+curl http://localhost:8802/v1/models
 ```
 
 ---

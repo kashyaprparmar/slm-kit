@@ -17,6 +17,9 @@ __pycache__/
 node_modules/
 dist/
 .vite/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # OS
 .DS_Store
@@ -25,4 +28,3 @@ Thumbs.db
 # AI/Agents
 .claude/
 .agents/
-

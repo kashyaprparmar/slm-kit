@@ -13,7 +13,7 @@ clear "GPU is busy" message rather than a crash).
 
 Quick, hands-on testing.
 
-1. **Model:** pick a curated model or paste any HF repo id / local path.
+1. **Model:** pick a curated model, a completed SLM Kit run, or paste any HF repo id / local path.
 2. **Prompt:** type anything.
 3. **Generation params** (right panel):
    - **Max new tokens** — response length cap
@@ -76,6 +76,8 @@ Use several together; no single number tells the whole story.
 
 - Everything here works on **any** model — you do **not** need to have trained it
   in SLM Kit.
+- Completed in-app runs use stable `run:<id>` references. The shared loader
+  resolves full checkpoints, PEFT adapters, and scratch-pretrained models.
 - Without the `[eval]` extra, ROUGE/BLEU are simply skipped (not errored); the
   other metrics still compute.
 - Without a judge API key, the LLM-as-judge option is disabled and everything

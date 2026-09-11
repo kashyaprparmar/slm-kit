@@ -17,6 +17,8 @@ export function FitIndicator({ estimate }: { estimate: MemoryEstimate }) {
   const parts: { label: string; value: number; color: string }[] = [
     { label: "Weights", value: estimate.weights_mb, color: "bg-primary" },
     { label: "Optimizer", value: estimate.optimizer_mb, color: "bg-[hsl(252_60%_50%)]" },
+    { label: "Gradients", value: estimate.gradients_mb ?? 0, color: "bg-warning" },
+    { label: "Adapters", value: estimate.adapters_mb ?? 0, color: "bg-success" },
     { label: "Activations", value: estimate.activations_mb, color: "bg-[hsl(200_70%_50%)]" },
     { label: "KV cache", value: estimate.kv_cache_mb, color: "bg-[hsl(170_60%_45%)]" },
     { label: "Overhead", value: estimate.overhead_mb, color: "bg-muted-foreground/60" },
@@ -27,7 +29,7 @@ export function FitIndicator({ estimate }: { estimate: MemoryEstimate }) {
       <div className="flex items-center justify-between">
         <div className={cn("flex items-center gap-2 text-sm font-semibold", c.tone)}>
           <Icon className="size-4.5" />
-          {c.label}
+          {estimate.verdict || c.label}
         </div>
         <div className="text-right">
           <div className="font-mono text-sm font-semibold tabular-nums">{mb(estimate.total_mb)}</div>
@@ -65,6 +67,8 @@ export function FitIndicator({ estimate }: { estimate: MemoryEstimate }) {
           ))}
         </ul>
       )}
+      {!!estimate.safe_budget_mb && <p className="text-xs text-muted-foreground">Safe usable: {mb(estimate.safe_budget_mb)} · Headroom: {mb(estimate.headroom_mb)}</p>}
+      {estimate.suggestions?.map(s => <p className="text-xs text-warning" key={s}>{s}</p>)}
       <div className="text-right text-[10px] uppercase tracking-wider text-muted-foreground/60">
         via {estimate.source}
       </div>

@@ -118,7 +118,7 @@ def install_samples() -> list[Dataset]:
 
             report, stats = dsvalidate.validate(dest, spec.kind)
             existing = db.exec(
-                select(Dataset).where(Dataset.name == spec.name, Dataset.is_sample == True)  # noqa: E712
+                select(Dataset).where(Dataset.name == spec.name, Dataset.is_sample)
             ).first()
             row = existing or Dataset(name=spec.name, kind=spec.kind.value, path=str(dest),
                                       fmt=stats.fmt, is_sample=True)

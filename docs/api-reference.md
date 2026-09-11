@@ -14,6 +14,8 @@ All bodies/responses are JSON. Endpoints are grouped by router.
 | GET | `/api/health` | Liveness: `{"status":"ok","version":...}` |
 | GET | `/api/system/hardware` | Live GPU/CPU/RAM/disk snapshot (`source`: `pynvml` or `fallback`) |
 | GET | `/api/system/status` | llmfit availability, HF/judge configured, current run id, data home, VRAM budget |
+| GET | `/api/system/diagnostics` | Python/GPU/library/integration checks with setup guidance |
+| GET | `/api/system/activity` | Structured activity history with correlation IDs and durations |
 
 ## Datasets
 
@@ -25,6 +27,7 @@ All bodies/responses are JSON. Endpoints are grouped by router.
 | POST | `/api/datasets/upload` | Multipart upload (`file`, `kind`, optional `name`) → validates + stores |
 | POST | `/api/datasets/install-samples` | Install/refresh the 10 bundled samples |
 | DELETE | `/api/datasets/{id}` | Delete a dataset (samples are protected) |
+| POST | `/api/datasets/{id}/prepare` | Map columns, validate, de-duplicate, shuffle, and create train/test datasets |
 
 ## Runs (training)
 
@@ -36,6 +39,7 @@ All bodies/responses are JSON. Endpoints are grouped by router.
 | GET | `/api/runs/{id}` | Run + checkpoints + queue position |
 | POST | `/api/runs` | Create + enqueue a run (`422` if it won't fit / invalid) |
 | POST | `/api/runs/{id}/cancel` | Cancel a queued/running run (frees VRAM) |
+| DELETE | `/api/runs/{id}` | Safely delete an inactive run without registered artifacts |
 | POST | `/api/runs/{id}/clone` | Return a copy of the config (name suffixed `-clone`) |
 | POST | `/api/runs/{id}/rerun` | Re-queue a new run from stored config |
 | GET | `/api/runs/{id}/export-config` | Config in an engine format (`{format,filename,content}`) |
@@ -45,10 +49,11 @@ All bodies/responses are JSON. Endpoints are grouped by router.
 
 ```jsonc
 {
-  "backend": "unsloth",          // "unsloth" | "scratch"
+  "backend": "unsloth",          // "unsloth" | "transformers" | "scratch"
   "task": "finetune",            // "finetune" | "continued_pretrain" | "pretrain"
   "method": "qlora",             // "lora" | "qlora" | "dora" | "full"
   "base_model": "unsloth/Qwen2.5-0.5B-Instruct",  // HF id or local path ("" for scratch)
+  "revision": "main",            // preferably pin a commit hash
   "dataset_id": 3,
   "output_name": "my-run",
   "load_in_4bit": true,
@@ -68,17 +73,40 @@ All bodies/responses are JSON. Endpoints are grouped by router.
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/advisor/recommend` | Rank base-model+method combos. Body: `{task, method, priority: "fastest"|"balanced"|"best_quality", max_seq_length}` |
+| POST | `/api/advisor/settings` | Deterministic presets with an explanation for each selected value |
 
 ## Registry
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/registry/capabilities` | `{gguf_available, hf_token_set, quant_types}` |
+| GET | `/api/registry/capabilities` | Export, publish, and deployment capabilities/status |
+| GET | `/api/registry/model-options` | Loadable runs/artifacts with stable refs and model kind |
 | GET | `/api/registry/local` | Local artifacts + finished-but-unpublished runs |
+| POST | `/api/registry/inspect` | Inspect model architecture, size, tokenizer, context and compatibility |
 | GET | `/api/registry/hf` | Your HF repos (needs token) + `token_set` |
 | POST | `/api/registry/publish` | `{run_id, repo_id, private}` → uploads with an auto model card |
 | POST | `/api/registry/import` | `{repo_id}` → download into local models dir |
 | POST | `/api/registry/quantize` | `{run_id, quant_type}` → background GGUF job (`202`), status on the artifact |
+| GET | `/api/registry/deployment` | Current deployment, endpoint, kind, PID, and recent logs |
+| POST | `/api/registry/deploy` | `{model_ref}` → start the local OpenAI-compatible model server |
+| DELETE | `/api/registry/deployment` | Stop serving and release model memory |
+| POST | `/api/registry/merge` | Merge a PEFT adapter into a standalone model in an isolated subprocess |
+| DELETE | `/api/registry/artifacts/{id}` | Safely remove an inactive artifact and registry-owned files |
+
+## Model serving providers
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/serving/providers` | Transformers and Ollama status, capabilities, models and endpoints |
+| POST | `/api/serving/ollama/start` | Keep an installed Ollama model loaded under the shared GPU lease |
+| POST | `/api/serving/ollama/stop` | Unload the SLM Kit-managed Ollama model |
+| POST | `/api/serving/ollama/import` | Import a ready GGUF artifact through the native Ollama CLI |
+| POST | `/api/serving/test` | Test the managed Transformers or Ollama server |
+
+Model references may be HF repo ids, local directories, or `run:<id>`. The
+stable run form is recommended because it correctly identifies adapter and
+scratch outputs. The deployed inference API is served on
+`http://localhost:8802/v1`; see [Local deployment](deployment.md).
 
 ## Eval Lab
 
@@ -97,6 +125,7 @@ Connect and receive JSON events (client messages are ignored / keepalive).
 | Path | Streams |
 |---|---|
 | `/ws/system` | hardware telemetry + queue state |
+| `/ws/activity` | structured application activity and request spans |
 | `/ws/runs/{id}` | `log` · `metric` · `checkpoint` · `sample` · `status` |
 | `/ws/eval/{id}` | `log` · `progress` · `model_done` · `result` · `status` |
 | `/ws/gen/{id}` | `log` · `token` · `done` · `error` |

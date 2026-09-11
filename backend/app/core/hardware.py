@@ -52,6 +52,7 @@ def read_hardware() -> HardwareProfile:
     try:
         usage = shutil.disk_usage(str(_settings.home))
         hw.disk_free_mb = usage.free // (1024 * 1024)
+        hw.disk_total_mb = usage.total // (1024 * 1024)
     except Exception:
         pass
 
@@ -72,8 +73,7 @@ def read_hardware() -> HardwareProfile:
             hw.source = "fallback"
     else:
         hw.source = "fallback"
-        # Assume the target box's budget so fit math still works headless.
-        hw.vram_total_mb = hw.vram_total_mb or _settings.vram_budget_mb
+        # Planning defaults belong in estimates, never in measured telemetry.
 
     return hw
 
@@ -105,6 +105,7 @@ class HardwarePoller:
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
 
 

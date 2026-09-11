@@ -80,10 +80,12 @@ bringing your own files. Use the **GPU** stack for this.
    (First launch downloads the base model — a 0.5B model is ~400 MB.)
 5. When it finishes, go to **Run History** — your run is there with its full
    curve and config. Click **Re-run** any time to repeat it exactly.
-6. Try your model: **Testing & Eval Lab → Playground**, keep the same base
-   model or point it at your output folder, type a prompt, **Generate**.
+6. Try your model: **Testing & Eval Lab → Playground**, select the completed
+   run (shown as `run:<id>`), type a prompt, and click **Generate**.
 7. Optional: **Model Registry → Publish** to push it to your Hugging Face
    account (needs a token — see [Configuration](configuration.md)).
+8. Optional: **Model Registry → Deploy** to expose the model locally at
+   `http://localhost:8802/v1` with an OpenAI-compatible chat/completions API.
 
 That's the whole loop. Now swap in your own data in the Dataset Manager and
 pick a bigger base model when you're ready.
@@ -149,7 +151,7 @@ the browser stays on Windows.
 PyPI's Windows `torch` wheels are CPU-only. Install CUDA torch from the
 PyTorch index first, then the rest — see [Installation](installation.md#without-docker-native-install).
 QLoRA on native Windows has been verified on an RTX 4060 with
-`torch==2.10.0+cu128`.
+`torch==2.11.0+cu128`.
 
 ### macOS
 

@@ -1,0 +1,20 @@
+# Keep the CUDA runtime ABI aligned with the PyTorch base image. Without these
+# constraints, pip may replace the image's CUDA 12.8 build with a mismatched
+# torch/CUDA stack while leaving torchaudio behind.
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0
+xformers==0.0.35
+torchao==0.18.0
+
+# Bounded compatibility windows make rebuilds predictable while retaining the
+# cross-version adapters in app/backends/unsloth_backend.py.
+transformers==4.57.6
+datasets==4.3.0
+tokenizers==0.22.2
+accelerate==1.15.0
+peft==0.20.0
+trl==0.23.1
+bitsandbytes==0.50.2
+unsloth==2026.9.4
+unsloth-zoo==2026.9.3

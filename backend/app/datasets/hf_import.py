@@ -14,7 +14,6 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
-from typing import Optional
 
 from app.core.logging_config import get_logger
 
@@ -32,7 +31,7 @@ def hf_datasets_available() -> bool:
 def import_dataset(
     repo_id: str,
     dest_path: Path,
-    config: Optional[str] = None,
+    config: str | None = None,
     split: str = "train",
     max_rows: int = 2000,
 ) -> int:
@@ -47,7 +46,7 @@ def import_dataset(
 
     try:
         ds = load_dataset(repo_id, config, split=split, streaming=True)
-    except Exception as e:  # noqa: BLE001 — surfaced to the user as-is (HF's own error is usually clear)
+    except Exception as e:
         raise HFImportError(f"Could not load '{repo_id}' (config={config!r}, split={split!r}): {e}") from e
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +60,7 @@ def import_dataset(
                     continue
                 f.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
                 written += 1
-    except Exception as e:  # noqa: BLE001 — network hiccups mid-stream, etc.
+    except Exception as e:
         dest_path.unlink(missing_ok=True)
         raise HFImportError(f"Import from '{repo_id}' failed partway through: {e}") from e
 

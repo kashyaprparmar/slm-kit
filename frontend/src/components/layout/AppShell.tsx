@@ -5,6 +5,8 @@ import { ResourceStrip } from "@/components/ResourceStrip";
 import { useTheme } from "@/components/theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { LoggerDock } from "@/components/LoggerDock";
+import { ErrorBoundary } from "@/components/ErrorPanel";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -29,8 +31,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-16 shrink-0 items-center gap-3 border-b bg-surface/50 px-4 backdrop-blur md:px-6">
-          <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setOpen(true)}>
+        <header className="flex min-h-16 shrink-0 items-center gap-3 border-b bg-surface/50 px-4 py-2 backdrop-blur md:px-6">
+          <Button variant="ghost" size="icon" className="lg:hidden" aria-label="Open navigation" onClick={() => setOpen(true)}>
             <Menu className="size-5" />
           </Button>
           <div className="min-w-0 flex-1">
@@ -42,8 +44,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8 md:py-8">{children}</div>
+          <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8 md:py-8"><ErrorBoundary>{children}</ErrorBoundary></div>
         </main>
+        <LoggerDock />
       </div>
     </div>
   );

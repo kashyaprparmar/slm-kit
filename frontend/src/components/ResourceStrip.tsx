@@ -37,7 +37,7 @@ function Meter({
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div
           className={cn("h-full rounded-full transition-[width] duration-700 ease-out", toneFor(ratio))}
-          style={{ width: `${Math.min(100, Math.max(2, ratio * 100))}%` }}
+          style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }}
         />
       </div>
     </div>
@@ -56,7 +56,7 @@ export function ResourceStrip() {
           <span className={cn("absolute inline-flex size-2 rounded-full", connected ? "bg-success animate-pulse-dot" : "bg-muted-foreground")} />
         </span>
         <span className="max-w-[10rem] truncate text-xs font-semibold" title={hw?.gpu_name ?? undefined}>
-          {hw?.gpu_name ?? "Detecting…"}
+          {hw?.gpu_name ?? (connected ? "No GPU detected" : "Backend offline")}
         </span>
       </div>
       <Meter icon={Zap} label="VRAM" used={vramUsed} total={hw?.vram_total_mb}
@@ -65,7 +65,8 @@ export function ResourceStrip() {
       <Meter icon={MemoryStick} label="RAM" used={ramUsed} total={hw?.ram_total_mb}
         valueText={`${mb(ramUsed)} / ${mb(hw?.ram_total_mb)}`} />
       <Meter icon={Cpu} label="CPU" utilPct={hw?.cpu_util_pct} valueText={pct(hw?.cpu_util_pct)} />
-      <Meter icon={HardDrive} label="Disk free" valueText={mb(hw?.disk_free_mb)} utilPct={0} />
+      <Meter icon={HardDrive} label="Disk free" valueText={mb(hw?.disk_free_mb)}
+        total={hw?.disk_total_mb} used={hw?.disk_total_mb != null && hw?.disk_free_mb != null ? hw.disk_total_mb - hw.disk_free_mb : null} />
     </div>
   );
 }

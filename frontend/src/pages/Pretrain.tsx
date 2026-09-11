@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Rocket, XCircle, AlertTriangle, Info, Check } from "lucide-react";
 import { toast } from "sonner";
@@ -14,6 +14,8 @@ import { FitIndicator } from "@/components/FitIndicator";
 import { RunMonitor } from "@/components/RunMonitor";
 import { ARCH_PRESETS, type ArchPreset } from "@/lib/constants";
 import { defaultPretrainForm, toPretrainPayload, type PretrainForm } from "@/lib/runconfig";
+import { useWorkflow } from "@/lib/workflow";
+import { ErrorPanel } from "@/components/ErrorPanel";
 import { useDebouncedValue } from "@/lib/hooks";
 import { compactNum } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -21,9 +23,9 @@ import type { ValidationReport } from "@/lib/types";
 
 export default function Pretrain() {
   const qc = useQueryClient();
-  const [form, setForm] = useState<PretrainForm>(defaultPretrainForm());
-  const [presetKey, setPresetKey] = useState("tiny");
-  const [launchedRunId, setLaunchedRunId] = useState<number | null>(null);
+  const [form, setForm] = useWorkflow<PretrainForm>("pretrain.form", defaultPretrainForm());
+  const [presetKey, setPresetKey] = useWorkflow("pretrain.preset", "tiny");
+  const [launchedRunId, setLaunchedRunId] = useWorkflow<number | null>("pretrain.run", null, false);
   const set = <K extends keyof PretrainForm>(k: K, v: PretrainForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   function applyPreset(p: ArchPreset) {
@@ -49,13 +51,13 @@ export default function Pretrain() {
     },
     onError: (err) => {
       if (err instanceof ApiError && err.status === 422) toast.error("Config failed validation — see the fit panel.");
-      else toast.error("Could not launch run");
+      else toast.error(err instanceof Error ? err.message : "Could not launch run");
     },
   });
 
   const report: ValidationReport | undefined = estimate.data?.validation;
   const headOk = form.n_embd % form.n_heads === 0;
-  const canLaunch = form.dataset_id != null && headOk && (report?.ok ?? false) && !launch.isPending;
+  const canLaunch = form.dataset_id != null && headOk && (report?.ok ?? false) && !launch.isPending && debounced === JSON.stringify(payload) && !estimate.isFetching;
 
   return (
     <div className="space-y-6">
@@ -151,7 +153,7 @@ export default function Pretrain() {
           <Card>
             <CardHeader><CardTitle>Predicted footprint</CardTitle></CardHeader>
             <CardContent className="space-y-3">
-              {estimate.isFetching && !estimate.data ? (
+              {estimate.error ? <ErrorPanel error={estimate.error} retry={() => estimate.refetch()} /> : estimate.isFetching && !estimate.data ? (
                 <Skeleton className="h-40" />
               ) : estimate.data ? (
                 <>

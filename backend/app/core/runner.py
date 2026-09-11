@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlmodel import Session
@@ -30,7 +30,7 @@ log = get_logger(__name__)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _topic(run_id: int) -> str:
@@ -56,7 +56,7 @@ class RunHandle:
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=5)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         # ...then escalate to termination to guarantee VRAM release.
         # terminate() is cross-platform (SIGTERM on POSIX, TerminateProcess on
@@ -64,9 +64,10 @@ class RunHandle:
         try:
             self.proc.terminate()
             await asyncio.wait_for(self.proc.wait(), timeout=3)
-        except (asyncio.TimeoutError, ProcessLookupError):
+        except (TimeoutError, ProcessLookupError):
             try:
                 self.proc.kill()
+                await self.proc.wait()
             except ProcessLookupError:
                 pass
 
@@ -110,7 +111,14 @@ async def execute(run_id: int, cancel_event: asyncio.Event) -> RunStatus:
     cancel_task = asyncio.create_task(cancel_event.wait())
     read_task = asyncio.create_task(_pump_stdout(run_id, proc, err_capture))
 
-    done, _ = await asyncio.wait({cancel_task, read_task}, return_when=asyncio.FIRST_COMPLETED)
+    try:
+        done, _ = await asyncio.wait({cancel_task, read_task}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        await handle.stop(graceful=False)
+        cancel_task.cancel()
+        await asyncio.gather(read_task, cancel_task, return_exceptions=True)
+        _finalize(run_id, proc.returncode, True)
+        raise
 
     cancelled = cancel_task in done and cancel_event.is_set()
     if cancelled:

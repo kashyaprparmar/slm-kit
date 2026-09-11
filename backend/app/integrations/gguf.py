@@ -6,7 +6,7 @@ raise a clear, actionable error instead of failing obscurely. Point
 ``convert_hf_to_gguf.py`` and a built ``llama-quantize`` binary.
 
 Note: GGUF conversion expects a *full/merged* model directory. LoRA/QLoRA runs
-save adapters; those must be merged first (a documented follow-up). Full
+save adapters; those must be merged first. Full
 fine-tunes and from-scratch/domain-adapted bases convert directly.
 """
 
@@ -16,13 +16,13 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 # Common GGUF quantization types (q4_k_m is the 8GB-friendly default).
 QUANT_TYPES = ["q4_k_m", "q5_k_m", "q8_0", "f16"]
 
-LogCallback = Optional[Callable[[str], None]]
+LogCallback = Callable[[str], None] | None
 
 
 def llamacpp_dir() -> Path | None:

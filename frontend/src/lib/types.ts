@@ -20,12 +20,20 @@ export interface HardwareProfile {
   cpu_count?: number | null;
   cpu_util_pct?: number | null;
   disk_free_mb?: number | null;
+  disk_total_mb?: number | null;
   source: string;
 }
 
 export interface MemoryEstimate {
   weights_mb: number;
   optimizer_mb: number;
+  gradients_mb?: number;
+  adapters_mb?: number;
+  safe_budget_mb?: number;
+  available_mb?: number | null;
+  headroom_mb?: number;
+  verdict?: string;
+  suggestions?: string[];
   activations_mb: number;
   kv_cache_mb: number;
   overhead_mb: number;
@@ -81,11 +89,22 @@ export interface Run {
   finished_at?: string | null;
 }
 
+export interface Checkpoint {
+  id: number;
+  run_id: number;
+  step: number;
+  path: string;
+  is_final: boolean;
+  created_at: string;
+}
+
 export interface SystemStatus {
   llmfit_available: boolean;
   hf_token_set: boolean;
   judge_configured: boolean;
   current_run?: number | null;
+  queued?: number[];
+  resource?: { kind: string; id?: string | number; since?: number };
   home: string;
   vram_budget_mb: number;
 }
@@ -112,6 +131,66 @@ export interface UnpublishedRun {
   hf_repo?: string | null;
   method: string;
   base_model: string;
+  model_ref?: string;
+}
+
+export interface ModelOption {
+  ref: string;
+  requested_ref: string;
+  load_ref: string;
+  kind: "transformers" | "adapter" | "scratch";
+  label: string;
+  base_model?: string | null;
+  run_id?: number | null;
+  local_path?: string | null;
+  deployable: boolean;
+  source: "run" | "artifact";
+  task?: string;
+  method?: string;
+}
+
+export interface ModelInspection {
+  model_ref: string;
+  reachable: boolean;
+  revision?: string | null;
+  kind?: string;
+  architecture?: string[];
+  model_type?: string | null;
+  parameters?: number | null;
+  context_length?: number | null;
+  vocab_size?: number | null;
+  tokenizer_class?: string | null;
+  supports_causal_lm?: boolean;
+  supports_lora?: boolean;
+  supports_full_training?: boolean;
+  supports_4bit?: boolean;
+  suggested_target_modules?: string[];
+  warnings?: string[];
+}
+
+export interface ModelLineage {
+  run_id: number;
+  name: string;
+  model_ref: string;
+  parent_ref?: string | null;
+  task: string;
+  method: string;
+  status: string;
+  dataset_id?: number | null;
+  created_at: string;
+}
+
+export interface DeploymentStatus {
+  available: boolean;
+  active: boolean;
+  state?: string;
+  model_ref?: string | null;
+  kind?: string | null;
+  endpoint?: string | null;
+  health_url?: string | null;
+  started_at?: number | null;
+  pid?: number | null;
+  logs?: string[];
 }
 
 export interface HFModel {

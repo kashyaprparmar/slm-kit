@@ -6,6 +6,9 @@ export interface RunForm {
   task: TaskType;
   method: Method;
   base_model: string;
+  revision: string;
+  seed: number;
+  gradient_checkpointing: boolean;
   dataset_id: number | null;
   output_name: string;
   // LoRA
@@ -33,6 +36,9 @@ export function defaultForm(overrides: Partial<RunForm> = {}): RunForm {
     task: "finetune",
     method: "qlora",
     base_model: "unsloth/Qwen2.5-0.5B-Instruct",
+    revision: "",
+    seed: 42,
+    gradient_checkpointing: true,
     dataset_id: null,
     output_name: "my-finetune",
     r: 16,
@@ -119,12 +125,29 @@ export function toPretrainPayload(f: PretrainForm): Record<string, unknown> {
 }
 
 /** Build the nested RunConfig payload the backend expects. */
+export function formFromConfig(config: Record<string, unknown>): RunForm {
+  const train = (config.train ?? {}) as Record<string, unknown>;
+  const optim = (config.optim ?? {}) as Record<string, unknown>;
+  const lora = (config.lora ?? {}) as Record<string, unknown>;
+  const defaults = defaultForm();
+  const result = { ...defaults };
+  for (const key of Object.keys(defaults) as (keyof RunForm)[]) {
+    const value = config[key] ?? train[key] ?? optim[key] ?? lora[key];
+    if (value !== undefined) Object.assign(result, { [key]: value });
+  }
+  result.revision = typeof config.revision === "string" ? config.revision : "";
+  result.max_steps = typeof train.max_steps === "number" ? train.max_steps : null;
+  return result;
+}
+
 export function toPayload(f: RunForm): Record<string, unknown> {
   return {
     backend: f.backend,
     task: f.task,
     method: f.method,
     base_model: f.base_model.trim(),
+    revision: f.revision?.trim() || null,
+    gradient_checkpointing: f.gradient_checkpointing ?? true,
     dataset_id: f.dataset_id,
     output_name: f.output_name.trim() || "my-finetune",
     load_in_4bit: f.method === "qlora",
@@ -141,6 +164,7 @@ export function toPayload(f: RunForm): Record<string, unknown> {
       optimizer: f.optimizer,
     },
     train: {
+      seed: f.seed ?? 42,
       epochs: f.epochs,
       max_steps: f.max_steps,
       per_device_batch_size: f.per_device_batch_size,

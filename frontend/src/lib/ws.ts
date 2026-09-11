@@ -21,11 +21,23 @@ export function useWebSocket<T = unknown>(
   cbRef.current = onMessage;
 
   useEffect(() => {
+    setConnected(false);
     if (!path) return;
     let ws: WebSocket | null = null;
     let retry = 0;
     let closed = false;
     let timer: ReturnType<typeof setTimeout>;
+    let heartbeat: ReturnType<typeof setInterval>;
+    const received = new Set<string>();
+    const deliver = (data: T & { _event_id?: string; type?: string; events?: T[] }) => {
+      if (data.type === "replay") { data.events?.forEach(e => deliver(e as T & { _event_id?: string })); return; }
+      if (data._event_id) {
+        if (received.has(data._event_id)) return;
+        received.add(data._event_id);
+        if (received.size > 3000) received.delete(received.values().next().value!);
+      }
+      cbRef.current(data);
+    };
 
     const connect = () => {
       ws = new WebSocket(wsUrl(path));
@@ -34,20 +46,22 @@ export function useWebSocket<T = unknown>(
         else log.debug(`connected ${path}`);
         retry = 0;
         setConnected(true);
+        heartbeat = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send("ping"); }, 15000);
       };
       ws.onmessage = (ev) => {
         try {
-          cbRef.current(JSON.parse(ev.data) as T);
-        } catch {
-          /* ignore non-JSON frames */
+          deliver(JSON.parse(ev.data));
+        } catch (e) {
+          log.error("Could not process live update", String(e));
         }
       };
       ws.onclose = () => {
+        clearInterval(heartbeat);
         setConnected(false);
         if (!closed) {
           retry = Math.min(retry + 1, 6);
           if (retry === 1) log.warn(`disconnected ${path} — reconnecting…`);
-          timer = setTimeout(connect, 400 * retry);
+          timer = setTimeout(connect, Math.min(10000, 400 * 2 ** retry) + Math.random() * 300);
         }
       };
       ws.onerror = () => ws?.close();
@@ -57,6 +71,7 @@ export function useWebSocket<T = unknown>(
     return () => {
       closed = true;
       clearTimeout(timer);
+      clearInterval(heartbeat);
       ws?.close();
     };
   }, [path]);

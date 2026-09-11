@@ -55,7 +55,7 @@ plain PyPI, overwriting your CUDA build.
   `+cpu` instead of `+cu128` (or similar), that's the bug.
 - Fix: reinstall the matched CUDA set from the PyTorch index:
   ```powershell
-  pip install "torch==2.10.0+cu128" "torchvision==0.25.0+cu128" "xformers==0.0.35" --index-url https://download.pytorch.org/whl/cu128
+  pip install "torch==2.11.0+cu128" "torchvision==0.26.0+cu128" "torchaudio==2.11.0+cu128" --index-url https://download.pytorch.org/whl/cu128
   ```
 - After any `pip install` that touches torch/torchvision/xformers/unsloth on
   native Windows, re-run `python -c "import torch; print(torch.cuda.is_available())"`

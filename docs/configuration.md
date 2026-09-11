@@ -12,6 +12,7 @@ same names in a `.env` file inside `backend/` (see `backend/.env.example`).
 | `SLMKIT_HOST` | `127.0.0.1` (native) / `0.0.0.0` (Docker) | API bind address |
 | `SLMKIT_PORT` | `8000` | API port |
 | `SLMKIT_CORS_ORIGINS` | `localhost:5173` origins | Allowed browser origins (JSON list) |
+| `SLMKIT_MAX_UPLOAD_MB` | `512` | Maximum dataset upload size; uploads are streamed to disk |
 
 ## Hugging Face
 
@@ -26,6 +27,15 @@ same names in a `.env` file inside `backend/` (see `backend/.env.example`).
 | `SLMKIT_JUDGE_PROVIDER` | `anthropic` | `anthropic` or `openai` |
 | `SLMKIT_JUDGE_API_KEY` | *(unset)* | Unlocks the judge checkbox in the Eval Lab |
 | `SLMKIT_JUDGE_MODEL` | `claude-sonnet-5` | Which model does the judging |
+
+## Model loading and deployment
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SLMKIT_TRUST_REMOTE_CODE` | `false` | Allow executable custom code from trusted HF model repositories |
+| `SLMKIT_DEPLOY_HOST` | `127.0.0.1` | Managed model-server bind address (Docker overrides it inside the container) |
+| `SLMKIT_DEPLOY_PORT` | `8802` | OpenAI-compatible local model-server port |
+| `SLMKIT_DEPLOY_STARTUP_TIMEOUT_SECONDS` | `180` | Maximum model-load wait before deployment fails |
 
 ## External tools
 

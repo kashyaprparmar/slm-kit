@@ -20,6 +20,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { compactNum, mb } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Dataset, DatasetKind, ValidationReport } from "@/lib/types";
+import { DatasetPreparation } from "@/components/DatasetPreparation";
+import { ErrorPanel } from "@/components/ErrorPanel";
 
 const KINDS: { value: DatasetKind; label: string }[] = [
   { value: "instruction", label: "Instruction / chat" },
@@ -76,7 +78,7 @@ export default function Datasets() {
           <Card>
             <CardHeader><CardTitle>Your datasets</CardTitle></CardHeader>
             <CardContent className="space-y-2">
-              {datasets.isLoading ? (
+              {datasets.error ? <ErrorPanel error={datasets.error} retry={() => datasets.refetch()} /> : datasets.isLoading ? (
                 [0, 1, 2].map((i) => <Skeleton key={i} className="h-14" />)
               ) : datasets.data?.length ? (
                 datasets.data.map((d) => (
@@ -116,14 +118,15 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function handleFile(file: File) {
+    if (uploading) return;
     setUploading(true);
     try {
       const { validation } = await api.uploadDataset(file, kind);
       if (validation.ok) toast.success(`Uploaded ${file.name} — validation passed`);
       else toast.warning(`Uploaded ${file.name} — validation found issues`);
       onUploaded();
-    } catch {
-      toast.error("Upload failed");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setUploading(false);
     }
@@ -148,7 +151,9 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
             const f = e.dataTransfer.files?.[0];
             if (f) handleFile(f);
           }}
-          onClick={() => inputRef.current?.click()}
+          role="button" tabIndex={0} aria-label="Upload dataset file" aria-disabled={uploading}
+          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") inputRef.current?.click(); }}
+          onClick={() => { if (!uploading) inputRef.current?.click(); }}
           className={cn(
             "flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors",
             dragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-muted/30",
@@ -160,6 +165,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
           <input
             ref={inputRef}
             type="file"
+            disabled={uploading}
             className="hidden"
             accept=".jsonl,.json,.csv,.txt,.parquet"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
@@ -283,9 +289,11 @@ function DatasetRow({ ds, active, onClick, onDeleted }: {
         <button
           onClick={(e) => {
             e.stopPropagation();
-            api.deleteDataset(ds.id).then(() => { toast.success("Deleted"); onDeleted(); });
+            if (window.confirm(`Delete dataset "${ds.name}"? Its uploaded file will be removed.`))
+              api.deleteDataset(ds.id).then(() => { toast.success("Dataset deleted"); onDeleted(); }).catch((err: Error) => toast.error(err.message));
           }}
           className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+          aria-label={`Delete ${ds.name}`}
         >
           <Trash2 className="size-4" />
         </button>
@@ -325,9 +333,11 @@ function PreviewPanel({ datasetId }: { datasetId: number | null }) {
             <ValidationSummary report={preview.data.validation} stats={preview.data.stats} />
             <TokenHistogram values={preview.data.stats.token_histogram} />
             <SampleRows rows={preview.data.stats.sample_rows} />
+            <p className="text-xs text-muted-foreground">Columns: {preview.data.stats.columns?.join(", ") || "text"} · Duplicates: {preview.data.stats.duplicate_rows ?? 0} · Invalid: {preview.data.stats.invalid_rows ?? 0} · Empty: {preview.data.stats.empty_rows ?? 0}</p>
+            <DatasetPreparation key={datasetId} datasetId={datasetId} columns={preview.data.stats.columns ?? []} />
           </>
         ) : (
-          <p className="text-sm text-muted-foreground">Could not load preview.</p>
+          <ErrorPanel error={preview.error ?? "Could not load dataset preview."} retry={() => preview.refetch()} />
         )}
       </CardContent>
     </Card>

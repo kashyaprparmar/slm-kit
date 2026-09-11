@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useWorkflow } from "@/lib/workflow";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical, Plus, Trash2, Trophy, History, Square, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -34,11 +36,18 @@ interface ResultView {
 
 export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
   const qc = useQueryClient();
-  const [models, setModels] = useState<string[]>(["unsloth/Qwen2.5-0.5B-Instruct"]);
-  const [datasetId, setDatasetId] = useState<number | null>(null);
-  const [maxSamples, setMaxSamples] = useState(25);
+  const [params] = useSearchParams();
+  useEffect(() => { const id = Number(params.get("result")); if (id > 0) void loadPast(id); }, [params]);
+  const [models, setModels] = useWorkflow<string[]>("eval.models", ["unsloth/Qwen2.5-0.5B-Instruct"]);
+  const [datasetId, setDatasetId] = useWorkflow<number | null>("eval.dataset", null);
+  const [maxSamples, setMaxSamples] = useWorkflow("eval.samples", 25);
   const [metrics, setMetrics] = useState<Set<string>>(new Set(["exact_match", "token_f1", "rouge_l", "bleu"]));
-  const [useJudge, setUseJudge] = useState(false);
+  const [useJudge, setUseJudge] = useWorkflow("eval.judge", false);
+
+  useEffect(() => {
+    const requested = params.get("model");
+    if (requested) setModels((current) => current.includes(requested) ? current : [requested, ...current]);
+  }, [params, setModels]);
 
   const [evalId, setEvalId] = useState<number | null>(null);
   const [lastEvalId, setLastEvalId] = useState<number | null>(null); // kept after finish so logs stay viewable
@@ -69,7 +78,7 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
     queryFn: async () => {
       const r = await api.evalResult(evalId!);
       const st = r.detail?.status;
-      if (st === "done" || st === "failed") {
+      if (st === "done" || st === "failed" || st === "cancelled") {
         setRunning(false);
         if (st === "done" && r.detail?.per_model && !result) {
           setResult({ per_model: r.detail.per_model, samples: r.detail.samples ?? [] });
@@ -87,7 +96,7 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
     if (ev.type === "progress") {
       setPhase(null);
       setProgress((p) => ({ ...p, [ev.model as string]: { done: ev.done as number, total: ev.total as number } }));
-      setLiveLogs((l) => [...l, { ts: Date.now() / 1000, level: "info", message: `progress: ${ev.model} ${ev.done}/${ev.total}` }]);
+      setLiveLogs((l) => [...l.slice(-1999), { ts: Date.now() / 1000, level: "info", message: `progress: ${ev.model} ${ev.done}/${ev.total}` }]);
     } else if (ev.type === "phase") {
       setPhase({ phase: ev.phase as string, model: ev.model as string, elapsed: ev.elapsed as number });
       setLiveLogs((l) => [...l, { ts: Date.now() / 1000, level: "info", message: `[${ev.phase}] model=${ev.model ?? ""} elapsed=${ev.elapsed ?? 0}s` }]);
@@ -97,6 +106,7 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
       setRunning(false);
       setPhase(null);
       if (ev.status === "failed") toast.error("Evaluation failed — see logs below.");
+      else if (ev.status === "cancelled") toast.message("Evaluation cancelled");
       else toast.success("Evaluation complete");
       qc.invalidateQueries({ queryKey: ["eval-results"] });
       qc.invalidateQueries({ queryKey: ["eval-status"] });
@@ -128,6 +138,7 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
     });
 
   async function run() {
+    setRunning(true);
     setResult(null); setProgress({}); setLiveLogs([]);
     try {
       const { eval_id } = await api.runEval({
@@ -135,12 +146,13 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
         dataset_id: datasetId,
         max_samples: maxSamples,
         metrics: [...metrics],
-        judge: useJudge,
+        judge: useJudge && judgeAvailable,
       });
       setEvalId(eval_id);
       setLastEvalId(eval_id);
       setRunning(true);
     } catch (e) {
+      setRunning(false);
       toast.error(e instanceof ApiError && e.status === 409 ? "GPU is busy — try again when the current job finishes." : "Could not start evaluation");
     }
   }

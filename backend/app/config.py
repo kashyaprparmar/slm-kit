@@ -26,12 +26,17 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    max_upload_mb: int = 512
 
     # Optional external integrations (app works fully without any of these).
     hf_token: str | None = None
     judge_provider: str = "anthropic"      # anthropic | openai
     judge_api_key: str | None = None
     judge_model: str = "claude-sonnet-5"
+
+    # Some HF repositories require executable custom modeling code. Disabled by
+    # default for safety; operators can opt in for a repository they trust.
+    trust_remote_code: bool = False
 
     # llmfit: shelled out via JSON. If the binary is missing we fall back to
     # the internal VRAM estimator, so this is best-effort.
@@ -46,6 +51,14 @@ class Settings(BaseSettings):
     vllm_gpu_memory_utilization: float = 0.55  # conservative default for 8GB cards
     vllm_max_model_len: int = 4096
     vllm_idle_timeout_seconds: float = 600.0   # auto-stop a warm server after 10 idle min
+
+    # Managed local deployment endpoint. This is deliberately separate from the
+    # playground's short-lived/warm vLLM process: it serves one selected model
+    # through an OpenAI-compatible API until explicitly stopped.
+    deploy_host: str = "127.0.0.1"
+    deploy_port: int = 8802
+    deploy_startup_timeout_seconds: float = 180.0
+    ollama_url: str = "http://127.0.0.1:11434"
 
     # Hardware polling cadence (seconds). Faster while a GPU job is running.
     idle_poll_seconds: float = 3.0
@@ -84,6 +97,10 @@ class Settings(BaseSettings):
     def hf_cache_dir(self) -> Path:
         return self.home / "hf-cache"
 
+    @property
+    def deployments_dir(self) -> Path:
+        return self.home / "deployments"
+
     def ensure_dirs(self) -> None:
         for d in (
             self.home,
@@ -91,6 +108,7 @@ class Settings(BaseSettings):
             self.models_dir,
             self.runs_dir,
             self.hf_cache_dir,
+            self.deployments_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

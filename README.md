@@ -2,13 +2,14 @@
 
 A self-hosted platform for running the **entire small-language-model lifecycle**
 — data prep → from-scratch pretraining → domain-adaptive continued pretraining →
-fine-tuning → evaluation → quantization/export → Hugging Face publishing — through
+fine-tuning → evaluation → local deployment → quantization/export → Hugging Face publishing — through
 a polished local web UI, on a single-GPU workstation.
 
 Tuned and defaulted for an **RTX 4060 8GB / 16GB RAM / Ryzen 7000** box, not a
 datacenter. Every default is chosen to run on first try on that hardware.
 
-> **Status:** all 8 pages built, reviewed, and end-to-end tested. See [Roadmap](#roadmap).
+> **Status:** the complete local workflow is implemented across Dashboard, data preparation,
+> three training studios, Run History, Eval Lab, Registry, Serving, and Diagnostics.
 
 ## 📚 Documentation
 
@@ -76,6 +77,8 @@ optional; the core loop works fully offline without any of them:
 | `SLMKIT_JUDGE_API_KEY` | Optional LLM-as-judge key (Anthropic/OpenAI) |
 | `SLMKIT_JUDGE_PROVIDER` | `anthropic` (default) or `openai` |
 | `SLMKIT_LLAMACPP_DIR` | llama.cpp checkout, enables GGUF export |
+| `SLMKIT_DEPLOY_PORT` | Managed OpenAI-compatible server port (default `8802`) |
+| `SLMKIT_TRUST_REMOTE_CODE` | Opt in to executable code from trusted custom HF repositories |
 | `SLMKIT_HOME` | Data directory (Docker default `/data/slmkit`) |
 
 ---
@@ -132,6 +135,8 @@ npm run dev      # http://localhost:5173  (proxies /api and /ws to :8000)
    streams live loss/tokens-per-sec/ETA over `ws://…/ws/runs/{run_id}`.
 7. **Publish to HF** — `POST /api/registry/publish` auto-generates a model card
    from the run metadata and uploads the adapter to your Hub repo.
+8. **Evaluate or deploy the exact output** — use `run:<id>` in Eval Lab, or click
+   **Deploy** in Model Registry for a local API at `http://localhost:8802/v1`.
 
 ---
 
@@ -168,7 +173,7 @@ backend/app/
   of truth for published model files.
 - **Config-as-data** — every run stores its full `RunConfig` JSON, so runs are
   reproducible and cloneable.
-- **Pluggable `TrainingBackend`** — Axolotl/LlamaFactory slot in later as pure
+- **Pluggable `TrainingBackend`** — optimized Unsloth and broad Transformers+PEFT engines are built in; Axolotl/LlamaFactory slot in later as pure
   `export_config` + `run` implementations with no core refactor.
 
 ---
@@ -196,6 +201,7 @@ Defaults are deliberately conservative:
 - [x] Run History: searchable table, live + historical curves, re-run from stored config, config export
 - [x] Model Registry: local artifacts + HF repos, publish (auto model card), import, GGUF export (via llama.cpp)
 - [x] Eval Lab: streaming playground + eval harness (EM / token-F1 / ROUGE / BLEU / perplexity) + optional LLM-as-judge + side-by-side comparison
+- [x] Stable model references + unified full-model/PEFT/scratch evaluation and managed local deployment
 - [ ] Axolotl / LlamaFactory backends (interface is ready — `export_config` + `run`)
 
 **All 8 core pages are built.** 🎉
@@ -207,8 +213,6 @@ build <https://github.com/ggerganov/llama.cpp>, then set
 `SLMKIT_LLAMACPP_DIR` to that checkout (it must contain
 `convert_hf_to_gguf.py` and a built `llama-quantize`). If it isn't set, the GGUF
 action reports exactly what to install. Conversion expects a full/merged model
-dir; LoRA/QLoRA adapters need merging first (a documented follow-up).
-- [ ] Eval harness (EM/ROUGE/BLEU/perplexity + optional LLM-as-judge + side-by-side)
-- [ ] GGUF export via llama.cpp
+directory; use **Merge Adapter** in the Registry before exporting LoRA/QLoRA/DoRA.
 - [ ] Axolotl / LlamaFactory backends
 ```

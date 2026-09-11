@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
 
 from app.config import get_settings
 
@@ -31,7 +30,7 @@ def judge_available() -> bool:
     return bool(_settings.judge_api_key)
 
 
-def judge_answer(question: str, answer: str, reference: Optional[str] = None) -> Optional[dict]:
+def judge_answer(question: str, answer: str, reference: str | None = None) -> dict | None:
     """Return {"score": 0..1, "raw": 1..10, "reason": str} or None if unavailable."""
     if not judge_available():
         return None
@@ -47,7 +46,7 @@ def judge_answer(question: str, answer: str, reference: Optional[str] = None) ->
     return _parse(text)
 
 
-def _parse(text: str) -> Optional[dict]:
+def _parse(text: str) -> dict | None:
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
         return None

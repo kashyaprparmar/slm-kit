@@ -61,7 +61,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       </nav>
 
       <div className="border-t px-4 py-3 text-[10px] text-muted-foreground">
-        Tuned for RTX 4060 · 8GB · v0.1.0
+        Local model workstation · v0.1.0
       </div>
     </div>
   );

@@ -2,14 +2,40 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter
 from pydantic import BaseModel
+from sqlmodel import Session
 
 from app.core.hardware import read_hardware
+from app.db.models import Dataset
+from app.db.session import engine
 from app.domain import FitLevel, Method, RunConfig, TaskType
-from app.integrations import estimator, llmfit
+from app.integrations import llmfit
 
 router = APIRouter(prefix="/api/advisor", tags=["advisor"])
+
+
+class SettingsBody(BaseModel):
+    config: RunConfig
+    preset: Literal["fast", "balanced", "best_quality", "lowest_memory"] = "balanced"
+
+
+@router.post("/settings")
+def training_settings(body: SettingsBody):
+    from fastapi import HTTPException
+
+    from app.integrations.recommendations import recommend_settings
+    from app.model_refs import ModelReferenceError
+    with Session(engine) as db:
+        dataset = db.get(Dataset, body.config.dataset_id) if body.config.dataset_id else None
+    try:
+        return recommend_settings(body.config, read_hardware(), body.preset,
+                                  (dataset.num_rows or 0) if dataset else 0,
+                                  (dataset.num_tokens_est or 0) if dataset else 0)
+    except ModelReferenceError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 # Curated 8GB-friendly candidates with rough quality tiers (1=basic … 5=strong).
 # Repo ids are pre-quantized (unsloth-bnb-4bit) where available for faster download.

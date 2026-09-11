@@ -12,11 +12,12 @@ import json
 import shutil
 import subprocess
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any
 
 from app.config import get_settings
 from app.domain import HardwareProfile, MemoryEstimate, RunConfig
 from app.integrations import estimator, hf_hub
+from app.model_refs import ModelReferenceError, resolve_model_ref
 
 _settings = get_settings()
 
@@ -26,7 +27,7 @@ def llmfit_available() -> bool:
     return shutil.which(_settings.llmfit_bin) is not None
 
 
-def _run_json(args: list[str], timeout: float = 30.0) -> Optional[Any]:
+def _run_json(args: list[str], timeout: float = 30.0) -> Any | None:
     if not llmfit_available():
         return None
     try:
@@ -48,18 +49,24 @@ def estimate_fit(cfg: RunConfig, hw: HardwareProfile) -> MemoryEstimate:
 
     Tries llmfit first; on any failure or absence, uses the local estimator.
     """
-    if llmfit_available() and cfg.base_model:
-        data = _run_json(
-            ["fit", "--json", "--perfect", "--model", cfg.base_model]
-        )
-        parsed = _parse_llmfit_fit(data, hw)
-        if parsed is not None:
-            return parsed
-    spec = hf_hub.get_model_spec(cfg.base_model) if cfg.base_model else estimator.spec_from_name("1.5b")
+    model_ref = cfg.base_model
+    if cfg.base_model:
+        try:
+            resolved = resolve_model_ref(cfg.base_model)
+            # Adapter configs are tiny; training memory is determined by their
+            # base architecture, not the adapter directory/name.
+            model_ref = resolved.base_model if resolved.kind == "adapter" else resolved.load_ref
+        except ModelReferenceError:
+            # Validation reports the actionable error; estimates should remain
+            # responsive while a user types an incomplete custom path.
+            model_ref = cfg.base_model
+    # Generic llmfit inference totals omit this run's optimizer and batch.
+    # Use the training-aware breakdown; llmfit remains available for discovery.
+    spec = hf_hub.get_model_spec(model_ref) if model_ref else estimator.spec_from_name("1.5b")
     return estimator.estimate(cfg, hw, spec)
 
 
-def _parse_llmfit_fit(data: Any, hw: HardwareProfile) -> Optional[MemoryEstimate]:
+def _parse_llmfit_fit(data: Any, hw: HardwareProfile) -> MemoryEstimate | None:
     """Map llmfit's JSON into our MemoryEstimate. Schema-tolerant.
 
     llmfit's exact JSON keys vary by version, so we probe a few likely fields and
@@ -85,7 +92,7 @@ def _parse_llmfit_fit(data: Any, hw: HardwareProfile) -> Optional[MemoryEstimate
     )
 
 
-def _first_number(d: dict, keys: list[str]) -> Optional[float]:
+def _first_number(d: dict, keys: list[str]) -> float | None:
     for k in keys:
         v = d.get(k)
         if isinstance(v, (int, float)):
@@ -93,7 +100,7 @@ def _first_number(d: dict, keys: list[str]) -> Optional[float]:
     return None
 
 
-def recommend(hw: HardwareProfile) -> Optional[list[dict[str, Any]]]:
+def recommend(hw: HardwareProfile) -> list[dict[str, Any]] | None:
     """Hardware-aware model recommendations from llmfit, if available."""
     data = _run_json(["recommend", "--json"])
     if isinstance(data, dict):

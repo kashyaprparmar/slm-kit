@@ -7,8 +7,7 @@ records, and the lineage that ties them together.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
@@ -16,49 +15,49 @@ from sqlmodel import Field, SQLModel
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Dataset(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     name: str
     kind: str                      # DatasetKind value
     path: str                      # absolute path on disk
     fmt: str                       # txt | jsonl | json | csv | parquet
-    num_rows: Optional[int] = None
-    num_tokens_est: Optional[int] = None
-    size_bytes: Optional[int] = None
+    num_rows: int | None = None
+    num_tokens_est: int | None = None
+    size_bytes: int | None = None
     is_sample: bool = False
-    validation: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    validation: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_utcnow)
 
 
 class Run(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     name: str
     task: str                      # TaskType value
     method: str                    # Method value
     backend: str
     base_model: str
-    dataset_id: Optional[int] = Field(default=None, foreign_key="dataset.id")
+    dataset_id: int | None = Field(default=None, foreign_key="dataset.id")
     status: str = "queued"         # RunStatus value
 
     config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    estimate: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    metrics: Optional[dict] = Field(default=None, sa_column=Column(JSON))
-    hardware: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    estimate: dict | None = Field(default=None, sa_column=Column(JSON))
+    metrics: dict | None = Field(default=None, sa_column=Column(JSON))
+    hardware: dict | None = Field(default=None, sa_column=Column(JSON))
 
-    output_dir: Optional[str] = None
-    hf_repo: Optional[str] = None
-    error: Optional[str] = None
+    output_dir: str | None = None
+    hf_repo: str | None = None
+    error: str | None = None
 
     created_at: datetime = Field(default_factory=_utcnow)
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class Checkpoint(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     run_id: int = Field(foreign_key="run.id")
     step: int
     path: str
@@ -67,25 +66,25 @@ class Checkpoint(SQLModel, table=True):
 
 
 class ModelArtifact(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     name: str
     kind: str                      # ArtifactKind value
-    run_id: Optional[int] = Field(default=None, foreign_key="run.id")
-    base_model: Optional[str] = None
-    local_path: Optional[str] = None
-    hf_repo: Optional[str] = None
+    run_id: int | None = Field(default=None, foreign_key="run.id")
+    base_model: str | None = None
+    local_path: str | None = None
+    hf_repo: str | None = None
     published: bool = False
     status: str = "ready"          # ready | quantizing | failed
-    error: Optional[str] = None
-    meta: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    error: str | None = None
+    meta: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_utcnow)
 
 
 class EvalResult(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     model_ref: str                 # HF repo id or local path evaluated
-    dataset_id: Optional[int] = Field(default=None, foreign_key="dataset.id")
-    run_id: Optional[int] = Field(default=None, foreign_key="run.id")
+    dataset_id: int | None = Field(default=None, foreign_key="dataset.id")
+    run_id: int | None = Field(default=None, foreign_key="run.id")
     scores: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    detail: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    detail: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_utcnow)

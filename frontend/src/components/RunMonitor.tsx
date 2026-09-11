@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid,
 } from "recharts";
-import { Ban, Activity, Gauge, Clock } from "lucide-react";
+import { Ban, Activity, Gauge, Clock, Cpu, Save } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { useWebSocket } from "@/lib/ws";
@@ -19,14 +19,17 @@ import type { RunStatus, TrainingEvent } from "@/lib/types";
 interface Point {
   step: number;
   loss?: number;
+  eval_loss?: number;
+  learning_rate?: number;
   tokens_per_sec?: number;
+  vram_mb?: number;
 }
 
 export function RunMonitor({ runId }: { runId: number }) {
   const run = useQuery({ queryKey: ["run", runId], queryFn: () => api.getRun(runId), refetchInterval: 8000 });
   const [series, setSeries] = useState<Point[]>([]);
   const [liveLogs, setLiveLogs] = useState<LogLine[]>([]);
-  const [latest, setLatest] = useState<{ step: number; total?: number; tps?: number; eta?: number }>({ step: 0 });
+  const [latest, setLatest] = useState<{ step: number; total?: number; tps?: number; eta?: number; epoch?: number; lr?: number; vram?: number; elapsed?: number }>({ step: 0 });
   const [samples, setSamples] = useState<string[]>([]);
   const [liveStatus, setLiveStatus] = useState<RunStatus | null>(null);
 
@@ -40,7 +43,8 @@ export function RunMonitor({ runId }: { runId: number }) {
   useEffect(() => {
     if (!history.data?.metrics.length) return;
     const hist: Point[] = history.data.metrics.map((m) => ({
-      step: m.step, loss: m.loss, tokens_per_sec: m.tokens_per_sec,
+      step: m.step, loss: m.loss, eval_loss: m.eval_loss, learning_rate: m.learning_rate,
+      tokens_per_sec: m.tokens_per_sec ?? m.estimated_tokens_per_sec, vram_mb: m.vram_mb,
     }));
     setSeries((prev) => {
       const bySt = new Map<number, Point>();
@@ -49,7 +53,7 @@ export function RunMonitor({ runId }: { runId: number }) {
       return [...bySt.values()].sort((a, b) => a.step - b.step).slice(-600);
     });
     const last = history.data.metrics[history.data.metrics.length - 1];
-    setLatest((l) => (l.step >= last.step ? l : { step: last.step, tps: last.tokens_per_sec, eta: last.eta_seconds }));
+    setLatest((l) => (l.step >= last.step ? l : { step: last.step, tps: last.tokens_per_sec ?? last.estimated_tokens_per_sec, eta: last.eta_seconds, epoch: last.epoch, lr: last.learning_rate, vram: last.vram_mb, elapsed: last.elapsed_seconds }));
   }, [history.data]);
 
   // Persisted, comprehensive log history — makes the Logs panel useful for
@@ -67,9 +71,9 @@ export function RunMonitor({ runId }: { runId: number }) {
   const { connected } = useWebSocket<TrainingEvent>(`/ws/runs/${runId}`, (ev) => {
     if (ev.type === "metric") {
       const loss = ev.metrics.loss;
-      const tps = ev.metrics.tokens_per_sec;
-      setSeries((s) => [...s.slice(-400), { step: ev.step, loss, tokens_per_sec: tps }]);
-      setLatest({ step: ev.step, total: ev.total_steps, tps, eta: ev.metrics.eta_seconds });
+      const tps = ev.metrics.tokens_per_sec ?? ev.metrics.estimated_tokens_per_sec;
+      setSeries((s) => [...s.slice(-400), { step: ev.step, loss, eval_loss: ev.metrics.eval_loss, learning_rate: ev.metrics.learning_rate, tokens_per_sec: tps, vram_mb: ev.metrics.vram_mb }]);
+      setLatest({ step: ev.step, total: ev.total_steps, tps, eta: ev.metrics.eta_seconds, epoch: ev.metrics.epoch, lr: ev.metrics.learning_rate, vram: ev.metrics.vram_mb, elapsed: ev.metrics.elapsed_seconds });
     } else if (ev.type === "log") {
       setLiveLogs((l) => [...l.slice(-3000), { ts: ev.ts, level: ev.level, message: ev.message }]);
     } else if (ev.type === "sample") {
@@ -128,10 +132,13 @@ export function RunMonitor({ runId }: { runId: number }) {
               <Progress indeterminate />
             ) : null}
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               <Metric icon={Activity} label="Loss" value={finalLoss != null ? finalLoss.toFixed(4) : "—"} />
               <Metric icon={Gauge} label="Tokens/s" value={latest.tps != null ? Math.round(latest.tps).toString() : "—"} />
               <Metric icon={Clock} label="ETA" value={duration(latest.eta)} />
+              <Metric icon={Clock} label="Elapsed" value={duration(latest.elapsed)} />
+              <Metric icon={Cpu} label="VRAM" value={latest.vram != null ? `${Math.round(latest.vram)} MB` : "—"} />
+              <Metric icon={Activity} label="Learning rate" value={latest.lr != null ? latest.lr.toExponential(2) : "—"} />
             </div>
 
             <LossChart series={series} />
@@ -144,6 +151,17 @@ export function RunMonitor({ runId }: { runId: number }) {
                 </pre>
               </div>
             )}
+
+            {run.data?.checkpoints.length ? (
+              <details className="rounded-md border p-3 text-xs">
+                <summary className="cursor-pointer font-medium"><Save className="mr-1 inline size-3" /> Checkpoints ({run.data.checkpoints.length})</summary>
+                <ul className="mt-2 space-y-1 text-muted-foreground">
+                  {run.data.checkpoints.map((checkpoint) => (
+                    <li key={checkpoint.id} className="flex justify-between gap-3"><span>Step {checkpoint.step}{checkpoint.is_final ? " · final" : ""}</span><span className="truncate font-mono" title={checkpoint.path}>{checkpoint.path}</span></li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
 
             <LogPanel lines={logs} live={connected && running} title="Training logs" />
 
@@ -159,7 +177,7 @@ export function RunMonitor({ runId }: { runId: number }) {
   );
 }
 
-function Metric({ icon: Icon, label, value }: { icon: typeof Activity; label: string; value: string }) {
+function Metric({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string }) {
   return (
     <div className="rounded-md border bg-background/40 p-3">
       <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Icon className="size-3" />{label}</div>
@@ -189,9 +207,9 @@ function LossChart({ series }: { series: Point[] }) {
             labelStyle={{ color: "hsl(var(--muted-foreground))" }}
           />
           <Line type="monotone" dataKey="loss" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} isAnimationActive animationDuration={300} />
+          <Line type="monotone" dataKey="eval_loss" stroke="hsl(var(--warning))" strokeWidth={2} dot={false} connectNulls />
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
-

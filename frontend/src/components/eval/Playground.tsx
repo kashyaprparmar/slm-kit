@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Send, Square, Bot, Loader2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
@@ -12,6 +13,7 @@ import { BaseModelPicker } from "@/components/studio/BaseModelPicker";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { LogPanel, type LogLine } from "@/components/LogPanel";
+import { useWorkflow } from "@/lib/workflow";
 import { duration } from "@/lib/format";
 
 type GenEvent =
@@ -20,6 +22,7 @@ type GenEvent =
   | { type: "log"; level?: string; message: string }
   | { type: "error"; message: string }
   | { type: "done" };
+type GenerationMetrics = { seconds: number; tokens: number; tokens_per_second: number; peak_vram_mb?: number };
 
 const PHASE_LABEL: Record<string, string> = {
   importing: "Loading libraries…",
@@ -29,12 +32,16 @@ const PHASE_LABEL: Record<string, string> = {
 
 export function Playground() {
   const qc = useQueryClient();
-  const [modelRef, setModelRef] = useState("unsloth/Qwen2.5-0.5B-Instruct");
-  const [prompt, setPrompt] = useState("Explain what gross margin is in one paragraph.");
-  const [params, setParams] = useState({ max_new_tokens: 256, temperature: 0.7, top_p: 0.95, top_k: 50, repetition_penalty: 1.1 });
+  const [search] = useSearchParams();
+  const [modelRef, setModelRef] = useWorkflow("playground.model", "unsloth/Qwen2.5-0.5B-Instruct");
+  const [prompt, setPrompt] = useWorkflow("playground.prompt", "Explain what gross margin is in one paragraph.");
+  const [params, setParams] = useWorkflow("playground.params", { max_new_tokens: 256, temperature: 0.7, top_p: 0.95, top_k: 50, repetition_penalty: 1.1 });
   const [genId, setGenId] = useState<string | null>(null);
-  const [lastGenId, setLastGenId] = useState<string | null>(null); // kept after finish so logs stay viewable
+  const [lastGenId, setLastGenId] = useWorkflow<string | null>("playground.last", null, false); // kept after finish so logs stay viewable
   const [output, setOutput] = useState("");
+  const [systemPrompt, setSystemPrompt] = useWorkflow("playground.system", "");
+  const [seed, setSeed] = useWorkflow("playground.seed", 42);
+  const [generationMetrics, setGenerationMetrics] = useState<GenerationMetrics | null>(null);
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState<string>("");
   const [liveLogs, setLiveLogs] = useState<LogLine[]>([]);
@@ -42,9 +49,30 @@ export function Playground() {
   const startedAt = useRef<number>(0);
   const setP = (k: keyof typeof params, v: number | null) => setParams((p) => ({ ...p, [k]: v ?? p[k] }));
 
+  useEffect(() => {
+    const requested = search.get("model");
+    if (requested) setModelRef(requested);
+  }, [search, setModelRef]);
+
   // Global eval/GPU status — so we can show + clear a stuck busy state.
   const status = useQuery({ queryKey: ["eval-status"], queryFn: api.evalStatus, refetchInterval: 3000 });
   const busyElsewhere = (status.data?.busy ?? false) && !running;
+
+  useQuery({
+    queryKey: ["generation-result", genId],
+    queryFn: async () => {
+      const result = await api.generationResult(genId!);
+      if (["done", "failed", "cancelled"].includes(result.status)) {
+        if (result.output && !output) setOutput(result.output);
+        if (result.metrics) setGenerationMetrics(result.metrics as GenerationMetrics);
+        if (result.status === "failed") toast.error(result.error || "Generation failed");
+        finish();
+      }
+      return result;
+    },
+    enabled: !!genId && running,
+    refetchInterval: 2000,
+  });
 
   // Persisted logs for the most recent generation — lets the Logs panel stay
   // useful after the job finishes, not just while it's actively streaming.
@@ -75,19 +103,21 @@ export function Playground() {
     qc.invalidateQueries({ queryKey: ["gen-logs"] });
   }
 
-  useWebSocket<GenEvent>(genId ? `/ws/gen/${genId}` : null, (ev) => {
+  useWebSocket<GenEvent | ({ type: "metrics" } & GenerationMetrics)>(genId ? `/ws/gen/${genId}` : null, (ev) => {
     if (ev.type === "token") {
       setPhase("generating");
       setOutput((o) => o + ev.text);
     } else if (ev.type === "phase") {
       setPhase(ev.phase);
-      setLiveLogs((l) => [...l, { ts: Date.now() / 1000, level: "info", message: `[${ev.phase}] elapsed=${ev.elapsed ?? 0}s` }]);
+      setLiveLogs((l) => [...l.slice(-1999), { ts: Date.now() / 1000, level: "info", message: `[${ev.phase}] elapsed=${ev.elapsed ?? 0}s` }]);
     } else if (ev.type === "log") {
       setLiveLogs((l) => [...l, { ts: Date.now() / 1000, level: ev.level ?? "info", message: ev.message }]);
     } else if (ev.type === "error") {
       toast.error(ev.message || "Generation failed");
       setLiveLogs((l) => [...l, { ts: Date.now() / 1000, level: "error", message: ev.message }]);
       finish();
+    } else if (ev.type === "metrics") {
+      setGenerationMetrics(ev);
     } else if (ev.type === "done") {
       finish();
     }
@@ -95,19 +125,20 @@ export function Playground() {
 
   async function generate() {
     setOutput("");
+    setGenerationMetrics(null);
     setLiveLogs([]);
     setPhase("importing");
     setElapsed(0);
     startedAt.current = Date.now();
     setRunning(true);
     try {
-      const { gen_id } = await api.generate({ model_ref: modelRef, prompt, ...params });
+      const { gen_id } = await api.generate({ model_ref: modelRef, prompt, system_prompt: systemPrompt, seed, ...params });
       setGenId(gen_id);
       setLastGenId(gen_id);
     } catch (e) {
       setRunning(false);
       setPhase("");
-      toast.error(e instanceof ApiError && e.status === 409 ? "GPU is busy — cancel the current job or wait." : "Could not start generation");
+      toast.error(e instanceof ApiError && e.status === 409 ? "GPU is busy — cancel the current job or wait." : e instanceof Error ? e.message : "Could not start generation");
     }
   }
 
@@ -149,6 +180,7 @@ export function Playground() {
           <CardHeader><CardTitle>Prompt</CardTitle></CardHeader>
           <CardContent className="space-y-3">
             <BaseModelPicker value={modelRef} onChange={setModelRef} />
+            <Textarea aria-label="System prompt" placeholder="Optional system instructions" value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} />
             <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} className="min-h-[120px]" placeholder="Ask the model something…" />
             <div className="flex items-center gap-2">
               <Button onClick={generate} disabled={running || busyElsewhere || !modelRef.trim() || !prompt.trim()}>
@@ -175,6 +207,7 @@ export function Playground() {
             {running && phase === "loading_model" && <Badge variant="warning">downloading / loading</Badge>}
           </CardHeader>
           <CardContent>
+            {generationMetrics && <p className="mb-3 text-xs text-muted-foreground">{generationMetrics.tokens} tokens · {generationMetrics.seconds}s · {generationMetrics.tokens_per_second} tokens/s{generationMetrics.peak_vram_mb != null ? ` · ${generationMetrics.peak_vram_mb} MB peak VRAM` : ""}</p>}
             {output ? (
               <div className="whitespace-pre-wrap rounded-md border bg-background/40 p-4 text-sm leading-relaxed">
                 {output}
@@ -208,6 +241,7 @@ export function Playground() {
       <Card className="lg:sticky lg:top-4 lg:self-start">
         <CardHeader><CardTitle>Generation params</CardTitle></CardHeader>
         <CardContent className="space-y-4">
+          <NumberField label="Random Seed" value={seed} min={0} onChange={v => setSeed(v ?? 42)} hint="Use the same seed and settings for repeatable sampling." />
           <NumberField label="Max new tokens" value={params.max_new_tokens} min={1} step={16} onChange={(v) => setP("max_new_tokens", v)} />
           <NumberField label="Temperature" value={params.temperature} min={0} max={2} step={0.05} onChange={(v) => setP("temperature", v)} hint="0 = greedy/deterministic" />
           <NumberField label="Top-p" value={params.top_p} min={0} max={1} step={0.05} onChange={(v) => setP("top_p", v)} />

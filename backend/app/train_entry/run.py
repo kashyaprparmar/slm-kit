@@ -12,16 +12,16 @@ import sys
 import traceback
 from pathlib import Path
 
+from app.backends.base import RunContext, get_backend, load_builtin_backends
+from app.config import get_settings
+from app.core.events import LogEvent, StatusEvent, dump_event
+from app.domain import RunConfig
+
 # Force UTF-8 on stdout regardless of platform/console codepage. Training text
 # (tokenizer samples, dataset content, model output) can contain arbitrary
 # Unicode; Windows' default console encoding (cp1252) can't represent it and
 # would crash sys.stdout.write with a UnicodeEncodeError.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-from app.backends.base import RunContext, get_backend, load_builtin_backends
-from app.config import get_settings
-from app.core.events import LogEvent, StatusEvent, dump_event
-from app.domain import RunConfig
 
 
 def _emit(event) -> None:

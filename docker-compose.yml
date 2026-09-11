@@ -19,10 +19,12 @@ services:
     container_name: slmkit-backend
     ports:
       - "8000:8000"
+      - "127.0.0.1:8802:8802" # local-only managed OpenAI-compatible deployment
     environment:
       SLMKIT_HOME: /data/slmkit
       SLMKIT_HOST: 0.0.0.0
       SLMKIT_PORT: 8000
+      SLMKIT_DEPLOY_HOST: 0.0.0.0
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     env_file:

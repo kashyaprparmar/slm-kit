@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from app.core.events import TrainingEvent
 from app.domain import (
@@ -37,7 +37,7 @@ class RunContext:
     run_id: int
     workdir: Path
     checkpoint_dir: Path
-    resume_from: Optional[Path] = None
+    resume_from: Path | None = None
 
     def should_stop(self) -> bool:
         """True once a graceful-stop sentinel is written by the runner.
@@ -71,20 +71,20 @@ class TrainingBackend(Protocol):
 # --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
-_REGISTRY: dict[str, "TrainingBackend"] = {}
+_REGISTRY: dict[str, TrainingBackend] = {}
 
 
-def register_backend(backend: "TrainingBackend") -> None:
+def register_backend(backend: TrainingBackend) -> None:
     _REGISTRY[backend.name] = backend
 
 
-def get_backend(name: str) -> "TrainingBackend":
+def get_backend(name: str) -> TrainingBackend:
     if name not in _REGISTRY:
         raise KeyError(f"Unknown training backend: {name!r}. Registered: {list(_REGISTRY)}")
     return _REGISTRY[name]
 
 
-def list_backends() -> list["TrainingBackend"]:
+def list_backends() -> list[TrainingBackend]:
     return list(_REGISTRY.values())
 
 
@@ -95,7 +95,10 @@ def load_builtin_backends() -> None:
     machine without the GPU stack can still register the metadata-only surface
     of each backend. Heavy imports live inside each backend's ``run``.
     """
-    from app.backends import scratch_backend, unsloth_backend  # noqa: F401
+    from app.backends import scratch_backend, unsloth_backend
 
     register_backend(unsloth_backend.UnslothBackend())
+    generic = unsloth_backend.UnslothBackend()
+    generic.name = "transformers"
+    register_backend(generic)
     register_backend(scratch_backend.ScratchBackend())

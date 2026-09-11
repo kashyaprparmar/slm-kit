@@ -155,7 +155,7 @@ Data home defaults to `~/.slmkit/` (or `%USERPROFILE%\.slmkit` on Windows).
 Install CUDA torch first:
 
 ```powershell
-pip install "torch==2.10.0+cu128" "torchvision==0.25.0+cu128" "xformers==0.0.35" --index-url https://download.pytorch.org/whl/cu128
+pip install "torch==2.11.0+cu128" "torchvision==0.26.0+cu128" "torchaudio==2.11.0+cu128" --index-url https://download.pytorch.org/whl/cu128
 pip install -e ".[gpu]"
 ```
 

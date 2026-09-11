@@ -1,12 +1,4 @@
-"""Playground generation subprocess: stream tokens from any model.
-
-Invoked as ``python -m app.train_entry.generate <config.json>``. Emits JSON
-token/log/phase/done events on stdout. Loads the model, streams tokens via a
-TextIteratorStreamer, then exits so VRAM is released.
-
-A background heartbeat thread emits ``phase`` events while the (blocking) model
-load runs, so the UI can show "loading… (12s)" instead of an indefinite spinner.
-"""
+"""Playground generation subprocess for every model format SLM Kit supports."""
 
 from __future__ import annotations
 
@@ -17,11 +9,7 @@ import time
 import traceback
 from pathlib import Path
 
-# Force UTF-8 on stdout regardless of platform/console codepage — streamed
-# tokens can contain arbitrary Unicode that Windows' default console encoding
-# (cp1252) can't represent, which would crash sys.stdout.write.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 _lock = threading.Lock()
 
 
@@ -32,7 +20,7 @@ def emit(obj: dict) -> None:
 
 
 class Heartbeat:
-    """Emits a `phase` event every few seconds during a blocking step."""
+    """Keep the UI informed while a large model blocks during load."""
 
     def __init__(self, phase: str, every: float = 3.0) -> None:
         self.phase = phase
@@ -53,85 +41,48 @@ class Heartbeat:
         self._stop.set()
 
 
-def _encode(tok, messages: list[dict], plain_prompt: str, device):
-    """Return a dict of model inputs (input_ids [+ attention_mask]) on `device`.
-
-    transformers 5.x's apply_chat_template returns a BatchEncoding (dict-like),
-    not a bare tensor, so we normalize to a **kwargs-friendly dict either way.
-    """
-    enc = None
-    try:
-        enc = tok.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
-        )
-    except (TypeError, ValueError):
-        # Older transformers: no return_dict arg, or no chat template.
-        try:
-            out = tok.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
-            enc = {"input_ids": out}
-        except Exception:
-            enc = tok(plain_prompt, return_tensors="pt")
-    if not hasattr(enc, "items"):  # a bare tensor slipped through
-        enc = {"input_ids": enc}
-    return {k: v.to(device) for k, v in enc.items() if hasattr(v, "to")}
-
-
 def main(cfg_path: str) -> int:
-    cfg = json.loads(Path(cfg_path).read_text())
+    cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+    runtime = None
     try:
-        emit({"type": "phase", "phase": "importing", "elapsed": 0})
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+        from app.train_entry.model_runtime import load_runtime
 
         model_ref = cfg["model_ref"]
+        emit({"type": "phase", "phase": "importing", "elapsed": 0})
         emit({"type": "log", "message": f"Loading model: {model_ref}"})
-        emit({"type": "log", "message": "(first load downloads the model — this can take a few minutes)"})
-
         with Heartbeat("loading_model"):
-            tok = AutoTokenizer.from_pretrained(model_ref)
-            model = AutoModelForCausalLM.from_pretrained(
-                model_ref, torch_dtype="auto",
-                device_map="auto" if torch.cuda.is_available() else None,
-            )
-            model.eval()
-
-        device = next(model.parameters()).device
-        if tok.pad_token is None:
-            tok.pad_token = tok.eos_token
-        emit({"type": "log", "message": f"Model loaded on {device}. Generating…"})
+            runtime = load_runtime(model_ref)
+        emit({
+            "type": "log",
+            "message": f"Loaded {runtime.spec.kind} model '{runtime.display_name}'. Generating...",
+        })
         emit({"type": "phase", "phase": "generating", "elapsed": 0})
-
-        messages = [{"role": "user", "content": cfg["prompt"]}]
-        enc = _encode(tok, messages, cfg["prompt"], device)
-
-        streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
-        gen_kwargs = dict(
-            **enc,
-            streamer=streamer,
-            max_new_tokens=cfg.get("max_new_tokens", 256),
-            do_sample=cfg.get("temperature", 0.7) > 0,
-            temperature=max(0.01, cfg.get("temperature", 0.7)),
-            top_p=cfg.get("top_p", 0.95),
-            top_k=cfg.get("top_k", 50),
-            repetition_penalty=cfg.get("repetition_penalty", 1.1),
-            pad_token_id=tok.pad_token_id,
-        )
-        thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
-        thread.start()
-        n_tokens = 0
-        for text in streamer:
+        chunks = 0
+        output = []
+        started = time.perf_counter()
+        for text in runtime.stream(cfg["prompt"], cfg):
             if text:
-                n_tokens += 1
+                chunks += 1
+                output.append(text)
                 emit({"type": "token", "text": text})
-        thread.join()
-        emit({"type": "log", "message": f"Done — generated {n_tokens} token chunks."})
+        elapsed = time.perf_counter() - started
+        full_text = "".join(output)
+        tokens = len(runtime.tokenizer.encode(full_text).ids) if runtime.scratch else len(runtime.tokenizer.encode(full_text, add_special_tokens=False))
+        import torch
+        emit({"type": "metrics", "seconds": round(elapsed, 3), "tokens": tokens,
+              "tokens_per_second": round(tokens / max(.001, elapsed), 2),
+              "peak_vram_mb": round(torch.cuda.max_memory_allocated() / 1024**2, 1) if torch.cuda.is_available() else None})
+        emit({"type": "log", "message": f"Done - generated {chunks} chunks."})
         emit({"type": "done"})
         return 0
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - error is sent to the browser
         emit({"type": "log", "level": "error", "message": traceback.format_exc()})
         emit({"type": "error", "message": str(exc)})
         emit({"type": "done"})
         return 1
+    finally:
+        if runtime is not None:
+            runtime.unload()
 
 
 if __name__ == "__main__":

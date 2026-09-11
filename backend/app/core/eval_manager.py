@@ -1,7 +1,7 @@
 """Supervises eval + playground-generation subprocesses.
 
 Both load a model (GPU-heavy), so this serializes them and refuses to start while
-a training job is on the GPU — keeping the single-GPU box safe. Subprocess stdout
+another managed workload owns the GPU — keeping the single-GPU box safe. Subprocess stdout
 (newline JSON) is streamed to a WebSocket topic; eval results are persisted to the
 ``EvalResult`` table.
 
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import signal
 import sys
 import uuid
 from pathlib import Path
@@ -22,9 +21,11 @@ from pathlib import Path
 from sqlmodel import Session
 
 from app.config import get_settings
+from app.core.deployment import manager as deployment_manager
 from app.core.log_capture import append_log_line
 from app.core.logging_config import get_logger
 from app.core.queue import queue
+from app.core.resources import gpu
 from app.core.ws import hub
 from app.db.models import EvalResult
 from app.db.session import engine
@@ -51,6 +52,8 @@ def _want_vllm() -> bool:
 class EvalManager:
     def __init__(self) -> None:
         self._busy = False
+        self._lease: str | None = None
+        self._cancelling = False
         self._tasks: set[asyncio.Task] = set()
         # The running eval/gen subprocess + a human label, for cancel + status.
         self._proc: asyncio.subprocess.Process | None = None
@@ -58,15 +61,22 @@ class EvalManager:
 
     # ---- status --------------------------------------------------------
     def busy(self) -> bool:
-        # A warm vLLM server holds real VRAM even between requests, so it counts
-        # as "busy" too — otherwise a training run could be launched right into it.
-        return self._busy or queue.current_id is not None or vllm_serve.manager.model is not None
+        # A warm Playground server can accept another generation, so it is
+        # exposed through current() but does not block the next prompt. Training
+        # still stops it explicitly before claiming the GPU.
+        return (
+            self._busy
+            or queue.current_id is not None
+            or deployment_manager.active
+        )
 
     def current(self) -> dict | None:
         if self._current:
             return self._current
         if vllm_serve.manager.model is not None:
             return {"kind": "vllm-server", "id": vllm_serve.manager.model, "topic": None}
+        if deployment_manager.active:
+            return {"kind": "deployment", "id": deployment_manager.status()["model_ref"], "topic": None}
         return None
 
     def engine_info(self) -> dict:
@@ -80,13 +90,22 @@ class EvalManager:
         """Check + set busy synchronously so two rapid requests can't both pass."""
         if queue.current_id is not None:
             raise RuntimeError("GPU is busy with a training run. Try again when it finishes.")
+        if deployment_manager.active:
+            raise RuntimeError("GPU is serving a deployed model. Stop it in Model Registry before evaluating.")
+        if kind != "gen" and vllm_serve.manager.model is not None:
+            raise RuntimeError("GPU has a warm Playground model. Stop/clear it before running evaluation.")
         if self._busy:
             raise RuntimeError("GPU is busy with another eval/generation. Cancel it or wait.")
+        self._lease = gpu.acquire(kind, ident)
         self._busy = True
         self._current = {"kind": kind, "id": ident, "topic": f"{kind}:{ident}"}
         log.info("eval-manager acquired GPU for %s %s", kind, ident)
 
     def _release(self) -> None:
+        if self._cancelling:
+            return
+        gpu.release(self._lease)
+        self._lease = None
         self._busy = False
         self._proc = None
         self._current = None
@@ -101,6 +120,11 @@ class EvalManager:
         """Stop whatever's holding the GPU — a tracked subprocess, a warm vLLM
         server, or (defensively) a stuck busy flag with neither. Returns True if
         anything was actually cancelled/cleared."""
+        self._cancelling = True
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         proc = self._proc
         cur = self._current
         did_something = False
@@ -111,11 +135,12 @@ class EvalManager:
                 await hub.publish(cur["topic"], {"type": "log", "level": "warning",
                                                  "message": "Cancellation requested — stopping…"})
             try:
-                proc.send_signal(signal.SIGTERM)
+                proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     proc.kill()
+                    await proc.wait()
             except ProcessLookupError:
                 pass
             if cur.get("topic"):
@@ -132,24 +157,34 @@ class EvalManager:
             log.warning("cancel: no tracked process but busy=True — clearing stuck flag")
             did_something = True
 
+        if cur and cur["kind"] == "eval":
+            self._persist(cur["id"], None, "Cancelled by user")
+        self._cancelling = False
         self._release()
         return did_something
 
     # ---- Eval harness --------------------------------------------------
     async def start_eval(self, config: dict) -> int:
+        # Acquire before writing history. A rejected request must not leave a
+        # permanently "running" result row behind.
+        self._guard_and_acquire("eval", "pending")
         with Session(engine) as db:
-            row = EvalResult(
-                model_ref=",".join(config["models"]),
-                dataset_id=config.get("dataset_id"),
-                scores={},
-                detail={"status": "running", "models": config["models"]},
-            )
-            db.add(row)
-            db.commit()
-            db.refresh(row)
-            eval_id = row.id
-
-        self._guard_and_acquire("eval", eval_id)
+            try:
+                row = EvalResult(
+                    model_ref=",".join(config["models"]),
+                    dataset_id=config.get("dataset_id"),
+                    scores={},
+                    detail={"status": "running", "models": config["models"]},
+                )
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+                eval_id = row.id
+            except Exception:
+                self._release()
+                raise
+        self._current = {"kind": "eval", "id": eval_id, "topic": f"eval:{eval_id}"}
+        gpu.update(self._lease, "evaluation", eval_id)
         workdir = _settings.runs_dir / "eval" / str(eval_id)
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "config.json").write_text(json.dumps(config), encoding="utf-8")
@@ -204,23 +239,26 @@ class EvalManager:
             await proc.wait()
             if proc.returncode not in (0, None) and not error:
                 error = f"Eval subprocess exited with code {proc.returncode}"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             error = str(exc)
             log.exception("eval %s crashed", eval_id)
             append_log_line(lpath, "error", f"Eval manager error: {exc}")
         finally:
+            if self._cancelling:
+                error = "Cancelled by user"
             self._release()
             self._persist(eval_id, result, error)
-            log.info("eval %s finished: %s", eval_id, "failed" if error else "done")
-            append_log_line(lpath, "error" if error else "info", f"Eval finished: {'failed' if error else 'done'}")
-            await hub.publish(topic, {"type": "status", "status": "failed" if error else "done"})
+            terminal = "cancelled" if error == "Cancelled by user" else "failed" if error else "done"
+            log.info("eval %s finished: %s", eval_id, terminal)
+            append_log_line(lpath, "warning" if terminal == "cancelled" else "error" if error else "info", f"Eval finished: {terminal}")
+            await hub.publish(topic, {"type": "status", "status": terminal})
 
     def _persist(self, eval_id: int, result: dict | None, error: str | None) -> None:
         with Session(engine) as db:
             row = db.get(EvalResult, eval_id)
             if not row:
                 return
-            if result:
+            if result and not error:
                 row.scores = {m: v["scores"] for m, v in result.get("per_model", {}).items()}
                 row.detail = {
                     "status": "done",
@@ -228,7 +266,7 @@ class EvalManager:
                     "samples": result.get("samples", []),
                 }
             else:
-                row.detail = {**(row.detail or {}), "status": "failed", "error": error}
+                row.detail = {**(row.detail or {}), "status": "cancelled" if error == "Cancelled by user" else "failed", "error": error}
             db.add(row)
             db.commit()
 
@@ -236,7 +274,10 @@ class EvalManager:
     async def start_generate(self, config: dict) -> str:
         gen_id = uuid.uuid4().hex[:12]
         self._guard_and_acquire("gen", gen_id)
-        use_vllm = _want_vllm()
+        from app.model_refs import resolve_model_ref
+        resolved = resolve_model_ref(config["model_ref"])
+        config["model_ref"] = resolved.load_ref
+        use_vllm = _want_vllm() and resolved.kind == "transformers"
         log.info("generate %s starting: model=%s engine=%s", gen_id, config.get("model_ref"),
                  "vllm" if use_vllm else "transformers")
         if use_vllm:
@@ -258,6 +299,8 @@ class EvalManager:
         # flood the log for a long response) — the full text is logged once at
         # the end instead, alongside every other event type in full.
         chunks: list[str] = []
+        error_message = None
+        generation_metrics = {}
         try:
             await asyncio.sleep(0.4)
             proc = await asyncio.create_subprocess_exec(
@@ -285,19 +328,26 @@ class EvalManager:
                 elif etype == "phase":
                     append_log_line(lpath, "info", f"[{ev.get('phase')}] elapsed={ev.get('elapsed', 0)}s")
                 elif etype == "error":
+                    error_message = str(ev.get("message", "Generation failed"))
                     append_log_line(lpath, "error", str(ev.get("message", "")))
+                elif etype == "metrics":
+                    generation_metrics = ev
             await proc.wait()
             if proc.returncode not in (0, None):
                 msg = f"exited with code {proc.returncode}"
                 append_log_line(lpath, "error", msg)
                 await hub.publish(topic, {"type": "error", "message": msg})
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("generate %s crashed", gen_id)
             append_log_line(lpath, "error", f"Generate manager error: {exc}")
             await hub.publish(topic, {"type": "error", "message": str(exc)})
         finally:
+            if self._cancelling:
+                error_message = "Cancelled by user"
             if chunks:
                 append_log_line(lpath, "info", f"Generated response ({len(chunks)} chunks): " + "".join(chunks))
+            (workdir / "result.json").write_text(json.dumps({"output": "".join(chunks), "metrics": generation_metrics,
+                "status": "cancelled" if error_message == "Cancelled by user" else "failed" if error_message else "done", "error": error_message}), encoding="utf-8")
             self._release()
             log.info("generate %s finished", gen_id)
             append_log_line(lpath, "info", "Generation finished")
@@ -342,7 +392,7 @@ class EvalManager:
             async for text in vllm_serve.manager.stream_chat(config["prompt"], config):
                 chunks.append(text)
                 await hub.publish(topic, {"type": "token", "text": text})
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("vLLM generate %s failed — falling back to transformers", gen_id)
             msg = f"vLLM path failed ({exc}); retrying via transformers…"
             await hub.publish(topic, {"type": "log", "level": "warning", "message": msg})
@@ -358,7 +408,7 @@ class EvalManager:
                 (workdir / "config.json").write_text(json.dumps(config), encoding="utf-8")
                 await self._generate_transformers(gen_id, workdir)
             else:
-                # Note: does NOT stop the vLLM server — it stays warm for next time.
+                await vllm_serve.manager.stop()
                 self._release()
                 log.info("generate %s finished (vllm)", gen_id)
                 append_log_line(lpath, "info", "Generation finished")

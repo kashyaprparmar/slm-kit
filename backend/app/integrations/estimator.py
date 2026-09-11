@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.config import get_settings
 from app.domain import FitLevel, HardwareProfile, MemoryEstimate, Method, RunConfig
 
 _MB = 1024 * 1024
@@ -72,6 +73,8 @@ def _bytes_per_weight(cfg: RunConfig) -> float:
 def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEstimate:
     notes: list[str] = []
     n = spec.num_params
+    settings = get_settings()
+    adapters_mb = 0.0
 
     # --- Base weights ---------------------------------------------------
     weights_mb = n * _bytes_per_weight(cfg) / _MB
@@ -79,37 +82,57 @@ def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEsti
     # --- Trainable params + optimizer/grad ------------------------------
     if cfg.method in (Method.LORA, Method.QLORA, Method.DORA):
         # Adapter params ≈ 2 * r * hidden per target module per layer.
-        n_targets = max(1, len(cfg.lora.target_modules))
+        # PEFT's automatic ``all-linear`` default usually targets attention
+        # projections plus MLP projections (roughly seven matrices/layer).
+        n_targets = len(cfg.lora.target_modules) or 7
         trainable = 2 * cfg.lora.r * spec.hidden_size * spec.num_layers * n_targets
         if cfg.method == Method.DORA:
             trainable = int(trainable * 1.5)  # DoRA adds a magnitude vector
         # LoRA optimizer/grad are fp32-ish but tiny relative to base.
-        optimizer_mb = trainable * (4 + 4 + 4) / _MB   # grad + m + v (fp32)
+        adapters_mb = trainable * 4 / _MB
+        gradients_mb = trainable * 4 / _MB
+        optimizer_mb = trainable * (2 if "8bit" in cfg.optim.optimizer else 8) / _MB
         notes.append(f"~{trainable/1e6:.1f}M trainable adapter params")
     elif cfg.method == Method.FULL:
         trainable = n
         # adamw_8bit: 8-bit m+v (2B) + fp16 grad (2B) + fp32 master (4B).
-        optimizer_mb = trainable * (2 + 2 + 4) / _MB
+        gradients_mb = trainable * 2 / _MB
+        optimizer_mb = trainable * (6 if "8bit" in cfg.optim.optimizer else 12) / _MB
         notes.append("Full fine-tune: optimizer state dominates VRAM")
     else:  # prompt/prefix tuning — trainable is negligible
         optimizer_mb = 8.0
+        gradients_mb = 4.0
 
     # --- Activations (with gradient checkpointing assumed, as Unsloth does) ---
     b = cfg.train.per_device_batch_size
     s = cfg.train.max_seq_length
     # Checkpointed activations ~ store per-layer inputs: b * s * hidden * 2 bytes,
     # times a modest constant for attention/MLP temporaries.
-    activations_mb = b * s * spec.hidden_size * 2 * 3.0 / _MB
+    activations_mb = b * s * spec.hidden_size * 2 * (max(4, spec.num_layers * .6) if cfg.gradient_checkpointing else spec.num_layers * 8) / _MB
 
     # --- KV cache (small during checkpointed training; kept for realism) ---
-    kv_cache_mb = 2 * b * s * spec.num_kv_heads * spec.head_dim * spec.num_layers * 2 / _MB
+    kv_cache_mb = 0.0  # Training disables use_cache; attention temporaries are in activations.
 
-    subtotal = weights_mb + optimizer_mb + activations_mb + kv_cache_mb
+    subtotal = weights_mb + adapters_mb + gradients_mb + optimizer_mb + activations_mb + kv_cache_mb
     overhead_mb = _CUDA_CONTEXT_MB + 0.15 * subtotal
     total_mb = subtotal + overhead_mb
 
-    budget_mb = float(hw.vram_total_mb or 8192)
-    safe = budget_mb * 0.90
+    budget_mb = float(hw.vram_total_mb or settings.vram_budget_mb)
+    available = float(hw.vram_free_mb) if hw.vram_free_mb is not None else budget_mb
+    safe = min(available, budget_mb * settings.vram_safe_fraction)
+    suggestions = []
+    if not hw.gpu_name:
+        notes.append("No GPU detected; this is a planning budget, not measured VRAM.")
+    if total_mb > safe:
+        if b > 1:
+            suggestions.append(f"Reduce Batch Size from {b} to 1.")
+        if s > 256:
+            suggestions.append(f"Reduce Context Length from {s} to {max(256, s // 2)}.")
+        if cfg.method != Method.QLORA:
+            suggestions.append("Use QLoRA to load base weights in 4-bit.")
+        if not cfg.gradient_checkpointing:
+            suggestions.append("Enable gradient checkpointing.")
+        suggestions.append("Stop other GPU workloads or choose a smaller model.")
     if total_mb <= safe * 0.80:
         fit = FitLevel.FITS
     elif total_mb <= safe:
@@ -122,11 +145,18 @@ def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEsti
     return MemoryEstimate(
         weights_mb=round(weights_mb, 1),
         optimizer_mb=round(optimizer_mb, 1),
+        gradients_mb=round(gradients_mb, 1),
+        adapters_mb=round(adapters_mb, 1),
         activations_mb=round(activations_mb, 1),
         kv_cache_mb=round(kv_cache_mb, 1),
         overhead_mb=round(overhead_mb, 1),
         total_mb=round(total_mb, 1),
         budget_mb=round(budget_mb, 1),
+        available_mb=round(available, 1) if hw.gpu_name else None,
+        safe_budget_mb=round(safe, 1),
+        headroom_mb=round(safe - total_mb, 1),
+        verdict="Comfortable" if total_mb <= safe * .7 else "Should Fit" if total_mb <= safe * .85 else "Tight" if total_mb <= safe else "Unlikely to Fit",
+        suggestions=suggestions,
         fit=fit,
         source="fallback",
         notes=notes,

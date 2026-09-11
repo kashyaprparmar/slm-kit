@@ -37,6 +37,9 @@ def setup_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger("slmkit")
     root.setLevel(level)
     root.propagate = False
+    from app.core.observability import ActivityHandler
+
+    root.addHandler(ActivityHandler())
 
     console = logging.StreamHandler()
     console.setFormatter(logging.Formatter(_FMT, _DATEFMT))
