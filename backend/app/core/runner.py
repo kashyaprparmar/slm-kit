@@ -14,9 +14,10 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.config import get_settings
+from app.core.errors import normalize_failure
 from app.core.events import parse_event
 from app.core.log_capture import append_log_line
 from app.core.logging_config import get_logger
@@ -90,6 +91,7 @@ async def execute(run_id: int, cancel_event: asyncio.Event) -> RunStatus:
 
     # Persist config for the subprocess entrypoint.
     (workdir / "config.json").write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+    _write_manifest(run_id, phase="preparing", status=RunStatus.RUNNING.value)
     # Clear any stale stop sentinel from a previous run of this id.
     stop_flag = workdir / "STOP"
     if stop_flag.exists():
@@ -133,6 +135,9 @@ async def execute(run_id: int, cancel_event: asyncio.Event) -> RunStatus:
     await read_task  # drain remaining stdout
 
     status = _finalize(run_id, proc.returncode, cancelled, err_capture.get("msg"))
+    _write_manifest(run_id, phase="completed" if status == RunStatus.DONE else status.value, status=status.value)
+    if status == RunStatus.FAILED:
+        _write_failure_report(run_id)
     log.info("run %s finished: %s (exit=%s)", run_id, status.value, proc.returncode)
     append_log_line(log_path(run_id), "info", f"Run finished: {status.value} (exit code {proc.returncode})")
     return status
@@ -172,9 +177,19 @@ async def _pump_stdout(run_id: int, proc: asyncio.subprocess.Process, err_captur
             append_log_line(lpath, level, f"Status: {event.status}" + (f" — {event.detail}" if event.detail else ""))
         elif event.type == "log":
             append_log_line(lpath, event.level, event.message)
+        elif event.type == "warning":
+            append_log_line(lpath, "warning", f"{event.code}: {event.message}")
+        elif event.type == "error":
+            append_log_line(lpath, "error", f"{event.code}: {event.message}")
+        elif event.type == "artifact":
+            append_log_line(lpath, "info", f"Artifact {event.kind}: {event.path}")
+        elif event.type == "progress" and event.message:
+            append_log_line(lpath, "info", event.message)
 
         if event.type == "status" and event.status == "failed" and event.detail:
             err_capture["msg"] = event.detail
+        elif event.type == "error":
+            err_capture["msg"] = event.detail or event.message
         elif event.type == "log" and event.level == "error":
             # Keep the most specific error line seen (e.g. the exception message).
             err_capture["msg"] = event.message.strip().splitlines()[-1] if event.message.strip() else err_capture.get("msg")
@@ -222,3 +237,83 @@ def _finalize(run_id: int, returncode: int | None, cancelled: bool, error: str |
             db.add(run)
             db.commit()
     return status
+
+
+def _redact(value):
+    if isinstance(value, dict):
+        return {key: ("***" if any(secret in key.lower() for secret in ("token", "secret", "password", "api_key")) else _redact(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
+
+def _write_manifest(run_id: int, *, phase: str, status: str) -> None:
+    """Write a portable, atomically replaceable snapshot alongside each run."""
+    try:
+        with Session(engine) as db:
+            run = db.get(Run, run_id)
+            if not run:
+                return
+            checkpoints = db.exec(select(Checkpoint).where(Checkpoint.run_id == run_id)).all()
+            payload = {
+                "schema_version": 1,
+                "run_id": run.id,
+                "project_id": (run.config.get("extra") or {}).get("project_id"),
+                "name": run.name,
+                "task": run.task,
+                "phase": phase,
+                "status": status,
+                "model": {"reference": run.base_model, "revision": run.config.get("revision")},
+                "dataset_id": run.dataset_id,
+                "backend": run.backend,
+                "method": run.method,
+                "configuration": _redact(run.config),
+                "estimate": run.estimate,
+                "hardware": run.hardware,
+                "metrics": run.metrics,
+                "checkpoints": [{"step": item.step, "path": item.path, "final": item.is_final} for item in checkpoints],
+                "output_dir": run.output_dir,
+                "error": run.error,
+                "timestamps": {"created": run.created_at.isoformat(), "started": run.started_at.isoformat() if run.started_at else None,
+                               "finished": run.finished_at.isoformat() if run.finished_at else None},
+            }
+        path = _settings.runs_dir / str(run_id) / "run.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        temporary.replace(path)
+    except Exception as exc:  # noqa: BLE001 — manifest is best-effort observability
+        # Observability output must never change the result of the ML workload.
+        log.warning("run %s: could not write portable manifest: %s", run_id, exc)
+
+
+def _write_failure_report(run_id: int) -> None:
+    try:
+        with Session(engine) as db:
+            run = db.get(Run, run_id)
+            if not run:
+                return
+            normalized = normalize_failure(run.error or "Training worker failed without a structured error.")
+            report = {
+                **normalized,
+                "run_id": run_id,
+                "stage": "training",
+                "backend": run.backend,
+                "configuration": _redact(run.config),
+                "hardware": run.hardware,
+                "recent_logs": [],
+            }
+        try:
+            report["recent_logs"] = log_path(run_id).read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
+        except OSError:
+            pass
+        workdir = _settings.runs_dir / str(run_id)
+        (workdir / "failure.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+        suggestions = "\n".join(f"- {item}" for item in report["suggestions"])
+        (workdir / "failure.md").write_text(
+            f"# Run {run_id} failure\n\n**Code:** `{report['code']}`  \n**Category:** {report['category']}  \n"
+            f"**Stage:** training  \n**Backend:** {report['backend']}\n\n## Message\n\n{report['message']}\n\n"
+            f"## Recommended fixes\n\n{suggestions}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 — failure report must not hide the original failure
+        log.warning("run %s: could not write failure report: %s", run_id, exc)

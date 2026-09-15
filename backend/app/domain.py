@@ -23,6 +23,20 @@ class TaskType(str, Enum):
     FINETUNE = "finetune"                    # Pillar 3: instruction fine-tuning
 
 
+class TrainingStage(str, Enum):
+    """Stable execution stages shared by backends and dataset adapters.
+
+    ``TaskType`` remains the persisted/API vocabulary.  This separate stage
+    model lets later alignment work extend execution without changing old run
+    records or overloading the existing task enum.
+    """
+
+    FROM_SCRATCH_PRETRAINING = "from_scratch_pretraining"
+    CONTINUED_PRETRAINING = "continued_pretraining"
+    SUPERVISED_FINE_TUNING = "supervised_fine_tuning"
+    ALIGNMENT = "alignment"
+
+
 class Method(str, Enum):
     LORA = "lora"
     QLORA = "qlora"
@@ -62,6 +76,22 @@ class ArtifactKind(str, Enum):
 # --------------------------------------------------------------------------- #
 # Hardware & memory-fit
 # --------------------------------------------------------------------------- #
+class GPUDeviceProfile(BaseModel):
+    id: int
+    uuid: str | None = None
+    name: str
+    vram_total_mb: int
+    vram_free_mb: int
+    utilization_pct: float | None = None
+    compute_capability: str | None = None
+    temperature_c: float | None = None
+    power_watts: float | None = None
+    bf16_supported: bool = False
+    fp16_supported: bool = True
+    fp8_supported: bool = False
+    flash_attention_feasible: bool = False
+
+
 class HardwareProfile(BaseModel):
     gpu_name: str | None = None
     vram_total_mb: int | None = None
@@ -73,6 +103,13 @@ class HardwareProfile(BaseModel):
     cpu_util_pct: float | None = None
     disk_free_mb: int | None = None
     disk_total_mb: int | None = None
+    gpus: list[GPUDeviceProfile] = Field(default_factory=list)
+    gpu_count: int = 0
+    cuda_available: bool = False
+    cuda_runtime_version: str | None = None
+    nvidia_driver_version: str | None = None
+    mps_available: bool = False
+    platform: str | None = None
     source: str = "unknown"  # "pynvml" | "llmfit" | "fallback"
 
 
@@ -159,6 +196,16 @@ class TrainConfig(BaseModel):
     eval_on_completion: bool = True
 
 
+class TokenizerConfig(BaseModel):
+    """Versioned tokenizer/rendering policy shared by preparation and workers."""
+
+    mode: Literal["reuse", "extend", "train"] = "reuse"
+    chat_template: str | None = None
+    loss_policy: Literal["full_sequence", "completion_only", "assistant_only"] = "full_sequence"
+    added_tokens: list[str] = Field(default_factory=list)
+    added_special_tokens: list[str] = Field(default_factory=list)
+
+
 class ScratchArch(BaseModel):
     """Architecture config for the from-scratch pretraining pillar."""
 
@@ -171,9 +218,19 @@ class ScratchArch(BaseModel):
     tokenizer_name: str = "byte_bpe"      # custom tokenizer trained on the corpus
 
 
+class TrainingOperation(BaseModel):
+    """Normalized operation identity used for backend selection and validation."""
+
+    backend: str
+    task: TaskType
+    stage: TrainingStage
+    method: Method
+
+
 class RunConfig(BaseModel):
     """The complete, reproducible description of a training run."""
 
+    schema_version: Literal[1] = 1
     backend: str = "unsloth"              # registry key of the TrainingBackend
     task: TaskType
     method: Method = Method.QLORA
@@ -184,6 +241,7 @@ class RunConfig(BaseModel):
 
     load_in_4bit: bool = True             # QLoRA base quantization
     gradient_checkpointing: bool = True
+    tokenizer: TokenizerConfig = Field(default_factory=TokenizerConfig)
     lora: LoraParams = Field(default_factory=LoraParams)
     optim: OptimConfig = Field(default_factory=OptimConfig)
     train: TrainConfig = Field(default_factory=TrainConfig)
@@ -193,6 +251,28 @@ class RunConfig(BaseModel):
 
     # Escape hatch for backend-specific knobs without schema churn.
     extra: dict = Field(default_factory=dict)
+
+    @property
+    def training_stage(self) -> TrainingStage:
+        return training_stage_for_task(self.task)
+
+    @property
+    def operation(self) -> TrainingOperation:
+        return TrainingOperation(
+            backend=self.backend,
+            task=self.task,
+            stage=self.training_stage,
+            method=self.method,
+        )
+
+
+def training_stage_for_task(task: TaskType) -> TrainingStage:
+    """Translate the persisted task contract to the execution-stage contract."""
+    return {
+        TaskType.PRETRAIN: TrainingStage.FROM_SCRATCH_PRETRAINING,
+        TaskType.CONTINUED_PRETRAIN: TrainingStage.CONTINUED_PRETRAINING,
+        TaskType.FINETUNE: TrainingStage.SUPERVISED_FINE_TUNING,
+    }[task]
 
 
 class ExportedConfig(BaseModel):

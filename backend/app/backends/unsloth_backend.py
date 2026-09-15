@@ -13,10 +13,20 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
+from typing import Any
 
-from app.backends.base import RunContext
+from app.backends.base import RunContext, TrainingBackendCapabilities
+from app.capabilities import (
+    Capability,
+    ChatTemplateCapabilities,
+    PeftMethodCapability,
+    QuantizationCapability,
+    SupportState,
+    TokenizerCapabilities,
+    dependency_statuses,
+)
 from app.core.events import (
     CheckpointEvent,
     LogEvent,
@@ -59,17 +69,130 @@ def _unsloth_target_modules(requested: list[str]) -> list[str]:
 
 
 class UnslothBackend:
-    name = "unsloth"
-    supported_tasks = {TaskType.CONTINUED_PRETRAIN, TaskType.FINETUNE}
-    supported_methods = {Method.LORA, Method.QLORA, Method.DORA, Method.FULL}
+    def __init__(self, name: str = "unsloth") -> None:
+        if name not in {"unsloth", "transformers"}:
+            raise ValueError(f"Unsupported backend profile: {name}")
+        self.name = name
+
+    def capabilities(self) -> TrainingBackendCapabilities:
+        dependencies = dependency_statuses()
+        required = ["torch", "transformers", "trl", "peft"]
+        missing = [name for name in required if not dependencies[name].installed]
+        availability = Capability(
+            state=SupportState.MISSING_DEPENDENCY if missing else SupportState.SUPPORTED,
+            reason=(
+                f"Missing required packages: {', '.join(missing)}."
+                if missing
+                else (
+                    "Unsloth acceleration is used when compatible, with a Transformers + PEFT fallback."
+                    if self.name == "unsloth"
+                    else "Native Transformers, TRL, and PEFT training is available."
+                )
+            ),
+            requirements=required,
+        )
+        supported = Capability(state=SupportState.SUPPORTED, reason="Implemented by the causal-LM training worker.")
+        unsupported = Capability(state=SupportState.UNSUPPORTED, reason="This training stage is not implemented by this backend.")
+        bitsandbytes_installed = dependencies["bitsandbytes"].installed
+        qlora = Capability(
+            state=(SupportState.SUPPORTED if bitsandbytes_installed else SupportState.MISSING_DEPENDENCY),
+            reason=(
+                "4-bit adapter training is implemented on CUDA through bitsandbytes."
+                if bitsandbytes_installed
+                else "Install bitsandbytes to use 4-bit adapter training."
+            ),
+            requirements=["bitsandbytes", "CUDA"],
+        )
+        peft = {
+            Method.LORA.value: PeftMethodCapability(method=Method.LORA.value, support=supported),
+            Method.QLORA.value: PeftMethodCapability(
+                method=Method.QLORA.value,
+                support=qlora,
+                requires_quantized_base=True,
+            ),
+            Method.DORA.value: PeftMethodCapability(method=Method.DORA.value, support=supported),
+            Method.PROMPT_TUNING.value: PeftMethodCapability(
+                method=Method.PROMPT_TUNING.value,
+                support=Capability(state=SupportState.UNSUPPORTED, reason="Prompt tuning is not implemented by the current worker."),
+            ),
+        }
+        methods = {
+            Method.LORA.value: peft[Method.LORA.value].support,
+            Method.QLORA.value: peft[Method.QLORA.value].support,
+            Method.DORA.value: peft[Method.DORA.value].support,
+            Method.FULL.value: supported,
+            Method.PROMPT_TUNING.value: peft[Method.PROMPT_TUNING.value].support,
+        }
+        return TrainingBackendCapabilities(
+            name=self.name,
+            display_name="Unsloth" if self.name == "unsloth" else "Transformers / TRL / PEFT",
+            description=(
+                "Optimized causal-LM training with a native Transformers fallback."
+                if self.name == "unsloth"
+                else "Native Hugging Face causal-LM training."
+            ),
+            availability=availability,
+            tasks={
+                task.value: (supported if task in {TaskType.CONTINUED_PRETRAIN, TaskType.FINETUNE} else unsupported)
+                for task in TaskType
+            },
+            stages={
+                "from_scratch_pretraining": unsupported,
+                "continued_pretraining": supported,
+                "supervised_fine_tuning": supported,
+                "alignment": unsupported,
+            },
+            methods=methods,
+            tokenizer=TokenizerCapabilities(
+                modes={"reuse": supported, "extend": unsupported, "train": unsupported},
+                loss_policies={
+                    "full_sequence": supported,
+                    "completion_only": supported,
+                    "assistant_only": supported,
+                },
+                templates=ChatTemplateCapabilities(
+                    native=Capability(
+                        state=SupportState.SUPPORTED,
+                        reason="The worker uses the tokenizer's native template when one is present.",
+                    ),
+                    explicit_override=Capability(
+                        state=SupportState.SUPPORTED,
+                        reason="RunConfig may provide an explicit template.",
+                    ),
+                    fallback=Capability(
+                        state=SupportState.UNSUPPORTED,
+                        reason="The worker does not guess a family template.",
+                    ),
+                ),
+            ),
+            peft=peft,
+            quantization={
+                "nf4": QuantizationCapability(format="nf4", operations=["train"], support=qlora),
+                "fp16": QuantizationCapability(format="fp16", operations=["train"], support=supported),
+                "bf16": QuantizationCapability(format="bf16", operations=["train"], support=supported),
+            },
+            platforms=["linux", "windows", "wsl"],
+            architectures=["decoder-only causal language models"],
+            required_dependencies=required,
+            optional_dependencies=(
+                ["unsloth", "bitsandbytes", "accelerate", "xformers"]
+                if self.name == "unsloth"
+                else ["bitsandbytes", "accelerate", "xformers"]
+            ),
+        )
+
+    @property
+    def supported_tasks(self) -> set[TaskType]:
+        return self.capabilities().supported_tasks
+
+    @property
+    def supported_methods(self) -> set[Method]:
+        return self.capabilities().supported_methods
 
     # ---- metadata (runs in API process) -------------------------------
     def validate_config(self, cfg: RunConfig, hw: HardwareProfile) -> ValidationReport:
         report = ValidationReport()
-        if cfg.task not in self.supported_tasks:
-            report.error(f"{self.name} backend does not support task '{cfg.task.value}'.")
-        if cfg.method not in self.supported_methods:
-            report.error(f"{self.name} backend does not support method '{cfg.method.value}'.")
+        self.capabilities().validate_operation(cfg, report)
         if not cfg.base_model:
             report.error("A base model (HF repo id or local path) is required.")
         else:
@@ -98,6 +221,15 @@ class UnslothBackend:
             report.warn("Full fine-tuning is only viable for very small models on 8GB VRAM.")
         if cfg.method == Method.QLORA and not hw.gpu_name:
             report.error("QLoRA requires a detected CUDA GPU. Use a GPU-enabled environment.")
+        if cfg.tokenizer.mode != "reuse":
+            report.error(
+                f"Tokenizer mode '{cfg.tokenizer.mode}' is not implemented by this worker. "
+                "Reuse the model tokenizer; tokenizer changes must never happen silently."
+            )
+        if cfg.tokenizer.loss_policy != "full_sequence" and cfg.task != TaskType.FINETUNE:
+            report.error("Completion/assistant-only loss is available only for supervised fine-tuning data.")
+        if cfg.tokenizer.loss_policy != "full_sequence" and cfg.train.packing:
+            report.error("Packing with masked completion/assistant loss is not supported by the current collator. Disable packing.")
         return report
 
     def estimate_footprint(self, cfg: RunConfig, hw: HardwareProfile) -> MemoryEstimate:
@@ -152,7 +284,7 @@ class UnslothBackend:
         model, tokenizer = self._load_trainable_model(cfg, emit)
         import torch
 
-        dataset = self._load_dataset(cfg, tokenizer, emit)
+        dataset, pretokenized = self._load_dataset(cfg, tokenizer, emit)
 
         import inspect
 
@@ -176,12 +308,20 @@ class UnslothBackend:
             seed=cfg.train.seed,
             bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
             fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
-            dataset_text_field="text",
             packing=cfg.train.packing,
             report_to="none",
         )
         # trl renamed max_seq_length → max_length (~0.20); support both.
         sft_params = inspect.signature(SFTConfig.__init__).parameters
+        if not pretokenized:
+            config_kwargs["dataset_text_field"] = "text"
+            if "dataset_kwargs" in sft_params:
+                config_kwargs["dataset_kwargs"] = {"add_special_tokens": False}
+            else:
+                raise RuntimeError(
+                    "This TRL version cannot disable automatic special tokens for pre-rendered chat data. "
+                    "Install a supported TRL release instead of training with duplicated BOS/EOS tokens."
+                )
         if "max_length" in sft_params:
             config_kwargs["max_length"] = cfg.train.max_seq_length
         else:
@@ -192,11 +332,19 @@ class UnslothBackend:
         # trl renamed tokenizer → processing_class (~0.12); support both.
         trainer_params = inspect.signature(SFTTrainer.__init__).parameters
         tok_kw = "processing_class" if "processing_class" in trainer_params else "tokenizer"
+        trainer_kwargs = {}
+        if pretokenized:
+            from transformers import DataCollatorForSeq2Seq
+
+            trainer_kwargs["data_collator"] = DataCollatorForSeq2Seq(
+                tokenizer=tokenizer, model=model, padding=True, label_pad_token_id=-100,
+            )
         trainer = SFTTrainer(
             model=model,
             train_dataset=dataset,
             args=args,
             callbacks=[callback],
+            **trainer_kwargs,
             **{tok_kw: tokenizer},
         )
 
@@ -382,7 +530,7 @@ class UnslothBackend:
 
     # -------------------------------------------------------------------
     def _load_dataset(self, cfg: RunConfig, tokenizer, emit):
-        """Resolve the dataset row and produce a HF Dataset with a 'text' column."""
+        """Resolve one immutable dataset file into rendered or labelled rows."""
         from datasets import load_dataset
         from sqlmodel import Session
 
@@ -405,9 +553,11 @@ class UnslothBackend:
 
             from datasets import Dataset as HFDataset
 
-            from app.datasets.validate import _extract_text, _iter_records
-            return HFDataset.from_generator(lambda: ({"text": _extract_text(row)}
-                for _, row in _iter_records(Path(path), ds_row.fmt) if isinstance(row, dict)))
+            from app.datasets.adapters import canonicalize
+            from app.datasets.validate import _iter_records
+            eos = tokenizer.eos_token or ""
+            return HFDataset.from_generator(lambda: ({"text": canonicalize(row).content_text() + eos}
+                for _, row in _iter_records(Path(path), ds_row.fmt) if isinstance(row, dict))), False
 
         # Instruction/chat: build a 'text' column via the model's chat template.
         if ds_row.fmt in ("jsonl", "json"):
@@ -419,33 +569,36 @@ class UnslothBackend:
         else:
             data = load_dataset("text", data_files=path, split="train")
 
-        def to_text(example: dict) -> dict:
-            return {"text": _format_example(example, tokenizer)}
+        if cfg.tokenizer.loss_policy == "full_sequence":
+            def to_text(example: Any) -> dict:
+                rec = dict(example) if isinstance(example, Mapping) and not isinstance(example, dict) else example
+                return {"text": _format_example(rec, tokenizer, cfg.tokenizer.chat_template)}
 
-        return data.map(to_text, remove_columns=[c for c in data.column_names if c != "text"])
+            return data.map(to_text, remove_columns=[c for c in data.column_names if c != "text"]), False
+
+        from app.train_entry.tokenization import render_and_tokenize
+
+        def tokenize(example: Any) -> dict:
+            rec = dict(example) if isinstance(example, Mapping) and not isinstance(example, dict) else example
+            result = render_and_tokenize(
+                rec, tokenizer, max_length=cfg.train.max_seq_length,
+                loss_policy=cfg.tokenizer.loss_policy,
+                chat_template=cfg.tokenizer.chat_template,
+            )
+            return {key: result[key] for key in ("input_ids", "attention_mask", "labels")}
+
+        return data.map(tokenize, remove_columns=data.column_names), True
 
 
-def _format_example(ex: dict, tokenizer) -> str:
-    """Turn a variety of common instruction schemas into a single training string."""
-    from app.datasets.validate import normalize_row
-    ex = normalize_row(ex)
-    if "messages" in ex and isinstance(ex["messages"], list):
-        messages = ex["messages"]
-    else:
-        instruction = ex.get("instruction") or ex.get("prompt") or ex.get("question") or ""
-        context = ex.get("input") or ex.get("context") or ""
-        answer = ex.get("output") or ex.get("response") or ex.get("answer") or ""
-        user = instruction if not context else f"{instruction}\n\n{context}"
-        messages = [
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": answer},
-        ]
-    try:
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    except Exception:
-        # Model has no chat template — fall back to a plain format.
-        parts = [f"{m['role']}: {m['content']}" for m in messages]
-        return "\n".join(parts) + (tokenizer.eos_token or "")
+def _format_example(ex: Any, tokenizer, chat_template: str | None = None) -> str:
+    """Render with an explicit/native chat template; never guess a hidden one."""
+    from app.train_entry.tokenization import render_and_tokenize
+
+    rec = dict(ex) if isinstance(ex, Mapping) and not isinstance(ex, dict) else ex
+    return render_and_tokenize(
+        rec, tokenizer, max_length=10**9, loss_policy="full_sequence",
+        chat_template=chat_template,
+    )["rendered"]
 
 
 class _StreamCallback:

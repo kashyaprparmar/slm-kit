@@ -12,7 +12,8 @@ The frontend can't reach the backend, or the GPU isn't visible.
   should be **healthy**. Then `curl http://127.0.0.1:8000/api/health`.
 - Native: is uvicorn running on port 8000? The Vite proxy targets `127.0.0.1:8000`.
 - Check GPU: `http://127.0.0.1:8000/api/system/hardware` should show your GPU
-  and `"source":"pynvml"`. If it says `"fallback"`, see the GPU section below.
+  and `"source":"pynvml"`. `cuda-fallback` is also a usable GPU state when
+  NVML metrics are unavailable; only `"fallback"` means no usable GPU was found.
 
 ### `docker compose` fails with "cannot connect to the docker API"
 Docker Desktop isn't running. Start it, wait until `docker info` works, retry.
@@ -38,7 +39,7 @@ The GPU stack (torch + CUDA wheels + Unsloth) is several GB.
   torch wheels include CUDA.
 - On **native Windows**: PyPI's Windows torch wheels are **CPU-only**. Install
   torch from the PyTorch CUDA index *first*, matching the versions unsloth
-  pins (`torch<2.11`), then the rest — see
+  pins (`torch==2.11.0` in the GPU image), then the rest — see
   [quickstart.md Step 2b](quickstart.md#step-2b-optional--enable-real-gpu-training-natively)
   for the exact commands. This combo is verified working on an RTX 4060.
 - Make sure you're on **Python 3.11+**.
@@ -135,6 +136,37 @@ The app runs, but with no real VRAM numbers and CPU-only training.
 - **WSL2 native:** `nvidia-smi` inside Ubuntu. If it fails, update the
   **Windows** NVIDIA driver. `wsl --shutdown` then reopen Ubuntu.
 - No NVIDIA GPU: `fallback` is expected — Unsloth training won't work.
+
+If the source is `cuda-fallback`, CUDA can see the GPU but NVML did not provide
+complete telemetry. Training remains available; check the reported GPU name
+and VRAM, then repair the host NVML/driver installation if precise utilization
+metrics are required.
+
+### Hugging Face model class import errors
+
+- `cannot import name BloomPreTrainedModel` indicates an incompatible
+  `peft`/`transformers` pair. Rebuild the GPU image instead of upgrading one
+  package in isolation; the image pins compatible versions and runs import
+  probes at build time.
+- `Could not find Qwen3ForCausalLM` means the installed Transformers build does
+  not expose the model class required by the checkpoint. Rebuild with the
+  current GPU Dockerfile and inspect `/api/system/diagnostics`; choose a model
+  whose capability metadata is marked supported if the error persists.
+- “Skipping import of cpp extensions due to incompatible torch version” is a
+  warning. The GPU image uses PyTorch `2.11.0+cu128`; Unsloth can fall back to
+  Transformers + PEFT when an optional extension is unavailable.
+
+### External provider GPU busy
+
+The optional vLLM profile and unmanaged Ollama processes reserve GPU memory.
+Stop them before training, merge, or managed evaluation:
+
+```powershell
+docker compose --profile vllm stop vllm
+```
+
+The API reports the owning provider and returns `409` until the GPU lease is
+available again.
 
 ---
 

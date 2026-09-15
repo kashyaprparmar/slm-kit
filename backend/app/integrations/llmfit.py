@@ -50,19 +50,22 @@ def estimate_fit(cfg: RunConfig, hw: HardwareProfile) -> MemoryEstimate:
     Tries llmfit first; on any failure or absence, uses the local estimator.
     """
     model_ref = cfg.base_model
+    revision = cfg.revision
     if cfg.base_model:
         try:
             resolved = resolve_model_ref(cfg.base_model)
             # Adapter configs are tiny; training memory is determined by their
             # base architecture, not the adapter directory/name.
             model_ref = resolved.base_model if resolved.kind == "adapter" else resolved.load_ref
+            if resolved.kind == "adapter":
+                revision = None
         except ModelReferenceError:
             # Validation reports the actionable error; estimates should remain
             # responsive while a user types an incomplete custom path.
             model_ref = cfg.base_model
     # Generic llmfit inference totals omit this run's optimizer and batch.
     # Use the training-aware breakdown; llmfit remains available for discovery.
-    spec = hf_hub.get_model_spec(model_ref) if model_ref else estimator.spec_from_name("1.5b")
+    spec = hf_hub.get_model_spec(model_ref, revision) if model_ref else estimator.spec_from_name("1.5b")
     return estimator.estimate(cfg, hw, spec)
 
 

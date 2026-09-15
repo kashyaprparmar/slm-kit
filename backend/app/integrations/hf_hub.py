@@ -15,6 +15,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.integrations.estimator import ModelSpec, spec_from_name
+from app.models.capabilities import resolve_capabilities
 
 _settings = get_settings()
 
@@ -32,15 +33,15 @@ def _hf_home() -> dict[str, str]:
 # Model metadata → ModelSpec (drives the fallback estimator)
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=64)
-def get_model_spec(repo_or_path: str) -> ModelSpec:
+def get_model_spec(repo_or_path: str, revision: str | None = None) -> ModelSpec:
     """Resolve architecture + parameter count for a repo id or local dir.
 
     Order: local config.json → HF Hub config.json + safetensors index →
     name-based heuristic. Cached — the estimate endpoint calls this on every
     debounced config change.
     """
-    cfg = _load_config(repo_or_path)
-    n_params = _param_count(repo_or_path, cfg)
+    cfg = _load_config(repo_or_path, revision)
+    n_params = _param_count(repo_or_path, cfg, revision)
     if cfg:
         hidden = int(cfg.get("hidden_size", 2048))
         layers = int(cfg.get("num_hidden_layers", 24))
@@ -53,7 +54,7 @@ def get_model_spec(repo_or_path: str) -> ModelSpec:
     return spec_from_name(repo_or_path)
 
 
-def _load_config(repo_or_path: str) -> dict[str, Any] | None:
+def _load_config(repo_or_path: str, revision: str | None = None) -> dict[str, Any] | None:
     local = Path(repo_or_path) / "config.json"
     if local.exists():
         try:
@@ -66,6 +67,7 @@ def _load_config(repo_or_path: str) -> dict[str, Any] | None:
         path = hf_hub_download(
             repo_id=repo_or_path,
             filename="config.json",
+            revision=revision,
             token=_token(),
             cache_dir=str(_settings.hf_cache_dir),
         )
@@ -74,12 +76,12 @@ def _load_config(repo_or_path: str) -> dict[str, Any] | None:
         return None
 
 
-def _param_count(repo_or_path: str, cfg: dict | None) -> int | None:
+def _param_count(repo_or_path: str, cfg: dict | None, revision: str | None = None) -> int | None:
     # Prefer the exact count HF exposes via safetensors metadata.
     try:
         from huggingface_hub import HfApi
 
-        info = HfApi().model_info(repo_or_path, token=_token(), files_metadata=False)
+        info = HfApi().model_info(repo_or_path, revision=revision, token=_token(), files_metadata=False)
         st = getattr(info, "safetensors", None)
         if st and getattr(st, "total", None):
             return int(st.total)
@@ -153,28 +155,54 @@ def inspect_model(repo_or_path: str, revision: str | None = None) -> dict[str, A
         (cfg.get(k) for k in ("max_position_embeddings", "n_positions", "seq_length", "model_max_length") if cfg.get(k)),
         tokenizer_cfg.get("model_max_length") or scratch_cfg.get("block_size"),
     )
-    params = _param_count(repo_or_path, cfg)
+    params = _param_count(repo_or_path, cfg, revision)
     quantization = cfg.get("quantization_config") or {}
     model_type = cfg.get("model_type")
-    causal = bool(
-        scratch
-        or any("CausalLM" in str(name) for name in architectures)
-        or cfg.get("is_decoder")
-        or (model_type and not cfg.get("is_encoder_decoder", False))
-    )
+    kind = "scratch" if scratch else "adapter" if adapter else "transformers"
+    capabilities = resolve_capabilities(repo_or_path, cfg or scratch_cfg, tokenizer_cfg, kind=kind)
+    causal = capabilities.architecture_kind in {"decoder_only", "scratch"}
     warnings: list[str] = []
     if not (cfg or adapter or scratch):
         warnings.append("No recognized Transformers, PEFT adapter, or SLM Kit scratch metadata was found.")
-    if cfg.get("is_encoder_decoder"):
-        warnings.append("Encoder-decoder models are not supported by the current causal-LM training backend.")
+    warnings.extend(capabilities.warnings)
     if not any("tokenizer" in name.lower() or name in {"vocab.json", "merges.txt"} for name in files):
         warnings.append("Tokenizer files were not found in this revision; loading may depend on a base model.")
+
+    resolved_commit = resolved_revision
+    if root.is_dir() and (root / ".git").exists():
+        head = root / ".git" / "HEAD"
+        if head.is_file():
+            try:
+                head_content = head.read_text(encoding="utf-8").strip()
+                if head_content.startswith("ref: "):
+                    ref_path = root / ".git" / head_content[5:].strip()
+                    if ref_path.is_file():
+                        resolved_commit = ref_path.read_text(encoding="utf-8").strip()
+                else:
+                    resolved_commit = head_content
+            except OSError:
+                pass
+
+    import hashlib
+    config_fingerprint = (
+        hashlib.sha256(json.dumps(cfg or scratch_cfg, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        if (cfg or scratch_cfg)
+        else None
+    )
+    tokenizer_fingerprint = (
+        hashlib.sha256(json.dumps(tokenizer_cfg, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        if tokenizer_cfg
+        else None
+    )
 
     return {
         "model_ref": repo_or_path,
         "reachable": True,
         "revision": resolved_revision,
-        "kind": "scratch" if scratch else "adapter" if adapter else "transformers",
+        "resolved_commit": resolved_commit,
+        "config_fingerprint": config_fingerprint,
+        "tokenizer_fingerprint": tokenizer_fingerprint,
+        "kind": kind,
         "adapter_base_model": adapter_cfg.get("base_model_name_or_path"),
         "architecture": architectures,
         "model_type": model_type,
@@ -184,12 +212,34 @@ def inspect_model(repo_or_path: str, revision: str | None = None) -> dict[str, A
         "tokenizer_class": tokenizer_cfg.get("tokenizer_class"),
         "quantization": quantization,
         "supports_causal_lm": causal,
-        "supports_lora": causal and not scratch,
-        "supports_full_training": causal,
-        "supports_4bit": causal and not scratch,
-        "suggested_target_modules": ["all-linear"] if causal and not scratch else [],
-        "warnings": warnings,
+        "supports_lora": capabilities.training["lora"].state.value in {"supported", "experimental"} and not scratch,
+        "supports_full_training": capabilities.training["full"].state.value in {"supported", "experimental"},
+        "supports_4bit": capabilities.quantization["bitsandbytes_4bit"].state.value in {"supported", "experimental"} and not scratch,
+        "suggested_target_modules": capabilities.suggested_target_modules,
+        "warnings": list(dict.fromkeys(warnings)),
+        "capabilities": capabilities.model_dump(mode="json"),
+        "dependencies": capabilities.dependencies,
     }
+
+
+@lru_cache(maxsize=128)
+def get_model_capabilities(repo_or_path: str, revision: str | None = None):
+    """Resolve cached capabilities without loading weights.
+
+    This helper is used by validation/recommendation paths.  Network or gated
+    model failures produce an explicit unknown/experimental profile; the full
+    inspection endpoint still returns the original reachability error.
+    """
+    cfg = _load_config(repo_or_path, revision) or {}
+    tokenizer_cfg: dict[str, Any] = {}
+    root = Path(repo_or_path)
+    tokenizer_path = root / "tokenizer_config.json"
+    if tokenizer_path.is_file():
+        try:
+            tokenizer_cfg = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            tokenizer_cfg = {}
+    return resolve_capabilities(repo_or_path, cfg, tokenizer_cfg)
 
 
 # --------------------------------------------------------------------------- #

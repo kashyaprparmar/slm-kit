@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip as RTooltip, Cell,
 } from "recharts";
@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input, Label } from "@/components/ui/input";
-import { NumberField } from "@/components/ui/field";
+import { Field, NumberField } from "@/components/ui/field";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -22,6 +22,8 @@ import { cn } from "@/lib/utils";
 import type { Dataset, DatasetKind, ValidationReport } from "@/lib/types";
 import { DatasetPreparation } from "@/components/DatasetPreparation";
 import { ErrorPanel } from "@/components/ErrorPanel";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { QualityProfileResult, TokenizerProfileResult } from "@/lib/types";
 
 const KINDS: { value: DatasetKind; label: string }[] = [
   { value: "instruction", label: "Instruction / chat" },
@@ -321,27 +323,152 @@ function PreviewPanel({ datasetId }: { datasetId: number | null }) {
 
   return (
     <Card>
-      <CardHeader><CardTitle>Preview & validation</CardTitle></CardHeader>
-      <CardContent className="space-y-5">
+      <CardHeader><CardTitle>Data Lab</CardTitle></CardHeader>
+      <CardContent>
         {preview.isLoading ? (
           <>
             <Skeleton className="h-20" />
             <Skeleton className="h-40" />
           </>
         ) : preview.data ? (
-          <>
-            <ValidationSummary report={preview.data.validation} stats={preview.data.stats} />
-            <TokenHistogram values={preview.data.stats.token_histogram} />
-            <SampleRows rows={preview.data.stats.sample_rows} />
-            <p className="text-xs text-muted-foreground">Columns: {preview.data.stats.columns?.join(", ") || "text"} · Duplicates: {preview.data.stats.duplicate_rows ?? 0} · Invalid: {preview.data.stats.invalid_rows ?? 0} · Empty: {preview.data.stats.empty_rows ?? 0}</p>
-            <DatasetPreparation key={datasetId} datasetId={datasetId} columns={preview.data.stats.columns ?? []} />
-          </>
+          <Tabs defaultValue="schema">
+            <TabsList className="w-full justify-start overflow-x-auto">
+              <TabsTrigger value="schema">Schema</TabsTrigger>
+              <TabsTrigger value="prepare">Prepare & lineage</TabsTrigger>
+              <TabsTrigger value="tokenizer">Tokenizer</TabsTrigger>
+              <TabsTrigger value="quality">Quality</TabsTrigger>
+            </TabsList>
+            <TabsContent value="schema" className="space-y-5">
+              <ValidationSummary report={preview.data.validation} stats={preview.data.stats} />
+              <TokenHistogram values={preview.data.stats.token_histogram} />
+              <SampleRows rows={preview.data.stats.sample_rows} />
+              <p className="text-xs text-muted-foreground">Columns: {preview.data.stats.columns?.join(", ") || "text"} · Duplicates: {preview.data.stats.duplicate_rows ?? 0} · Invalid: {preview.data.stats.invalid_rows ?? 0} · Empty: {preview.data.stats.empty_rows ?? 0}</p>
+            </TabsContent>
+            <TabsContent value="prepare" className="space-y-5">
+              <DatasetPreparation key={datasetId} datasetId={datasetId} columns={preview.data.stats.columns ?? []} />
+              <LineagePanel datasetId={datasetId} />
+            </TabsContent>
+            <TabsContent value="tokenizer"><TokenizerPanel datasetId={datasetId} /></TabsContent>
+            <TabsContent value="quality"><QualityPanel datasetId={datasetId} /></TabsContent>
+          </Tabs>
         ) : (
           <ErrorPanel error={preview.error ?? "Could not load dataset preview."} retry={() => preview.refetch()} />
         )}
       </CardContent>
     </Card>
   );
+}
+
+function useCurrentVersion(datasetId: number) {
+  const versions = useQuery({
+    queryKey: ["dataset-versions", datasetId],
+    queryFn: () => api.datasetVersions(datasetId),
+  });
+  return { ...versions, current: versions.data?.[0] };
+}
+
+function LineagePanel({ datasetId }: { datasetId: number }) {
+  const qc = useQueryClient();
+  const versions = useCurrentVersion(datasetId);
+  const recipes = useQuery({ queryKey: ["dataset-recipes", datasetId], queryFn: () => api.datasetRecipes(datasetId) });
+  const rerun = useMutation({
+    mutationFn: api.rerunDatasetRecipe,
+    onSuccess: (result) => {
+      toast.success(result.reused ? `Recipe #${result.recipe_id} reproduced the existing outputs.` : `Recipe #${result.recipe_id} published new outputs.`);
+      qc.invalidateQueries({ queryKey: ["datasets"] });
+      qc.invalidateQueries({ queryKey: ["dataset-versions", datasetId] });
+      qc.invalidateQueries({ queryKey: ["dataset-recipes", datasetId] });
+    },
+  });
+  if (versions.error || recipes.error || rerun.error) return <ErrorPanel error={versions.error ?? recipes.error ?? rerun.error} />;
+  return <div className="space-y-4 border-t pt-4">
+    <div>
+      <h3 className="text-sm font-medium">Immutable versions</h3>
+      <p className="text-xs text-muted-foreground">Files are fingerprinted at import or publication. Preparation never overwrites them.</p>
+    </div>
+    {versions.isLoading ? <Skeleton className="h-16" /> : <div className="space-y-2">{versions.data?.map(version =>
+      <div key={version.id} className="flex items-center justify-between rounded-md border p-2 text-xs">
+        <div><span className="font-medium">v{version.id}</span> <Badge variant="neutral">{version.split}</Badge><div className="mt-1 font-mono text-[10px] text-muted-foreground">{version.fingerprint.slice(0, 16)}…</div></div>
+        <div className="text-right text-muted-foreground">{compactNum(version.num_rows)} rows<br />{new Date(version.created_at).toLocaleString()}</div>
+      </div>)}</div>}
+    {recipes.data?.length ? <div className="space-y-2"><h3 className="text-sm font-medium">Recipes</h3>{recipes.data.map(recipe =>
+      <div key={recipe.id} className="flex items-center justify-between rounded-md border p-2 text-xs">
+        <div><span className="font-medium">#{recipe.id} {recipe.name}</span><div className="text-muted-foreground">source v{recipe.source_version_id} · {recipe.fingerprint.slice(0, 12)}…</div></div>
+        <Button size="sm" variant="outline" disabled={rerun.isPending} onClick={() => rerun.mutate(recipe.id)}>Replay</Button>
+      </div>)}</div> : null}
+  </div>;
+}
+
+function TokenizerPanel({ datasetId }: { datasetId: number }) {
+  const versions = useCurrentVersion(datasetId);
+  const [modelRef, setModelRef] = useState("HuggingFaceTB/SmolLM2-135M-Instruct");
+  const [revision, setRevision] = useState("");
+  const [maxLength, setMaxLength] = useState(1024);
+  const [sampleLimit, setSampleLimit] = useState(250);
+  const [lossPolicy, setLossPolicy] = useState("full_sequence");
+  const [chatTemplate, setChatTemplate] = useState("");
+  const profile = useMutation({
+    mutationFn: () => api.tokenizerProfile(versions.current!.id, {
+      model_ref: modelRef.trim(), revision: revision.trim() || undefined,
+      max_length: maxLength, sample_limit: sampleLimit, loss_policy: lossPolicy,
+      chat_template: chatTemplate.trim() || undefined,
+    }),
+  });
+  const result: TokenizerProfileResult | undefined = profile.data?.result;
+  if (versions.error) return <ErrorPanel error={versions.error} retry={() => versions.refetch()} />;
+  return <div className="space-y-4">
+    <p className="text-xs text-muted-foreground">Loads only the selected tokenizer in an isolated worker. The cached profile is bound to the dataset fingerprint, resolved tokenizer revision, template, and loss policy.</p>
+    <Field label="Tokenizer model"><Input className="font-mono" value={modelRef} onChange={e => setModelRef(e.target.value)} /></Field>
+    <div className="grid grid-cols-2 gap-3">
+      <Field label="Revision (optional)"><Input value={revision} onChange={e => setRevision(e.target.value)} placeholder="commit, tag, or branch" /></Field>
+      <Field label="Loss policy"><Select value={lossPolicy} onChange={e => setLossPolicy(e.target.value)}><option value="full_sequence">Full sequence</option><option value="completion_only">Completion only</option><option value="assistant_only">Assistant turns only</option></Select></Field>
+      <NumberField label="Maximum length" value={maxLength} min={16} max={1048576} onChange={value => setMaxLength(value ?? 1024)} />
+      <NumberField label="Rows to sample" value={sampleLimit} min={1} max={5000} onChange={value => setSampleLimit(value ?? 250)} />
+    </div>
+    <Field label="Custom chat template (optional)" hint="Jinja template used when the tokenizer has no native template."><textarea className="min-h-20 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs" value={chatTemplate} onChange={e => setChatTemplate(e.target.value)} /></Field>
+    {profile.error && <ErrorPanel error={profile.error} />}
+    <Button disabled={!versions.current || !modelRef.trim() || profile.isPending} onClick={() => profile.mutate()}>{profile.isPending ? "Profiling…" : "Profile tokenizer"}</Button>
+    {result && <TokenizerResults result={result} cached={profile.data?.cached ?? false} />}
+  </div>;
+}
+
+function TokenizerResults({ result, cached }: { result: TokenizerProfileResult; cached: boolean }) {
+  return <div className="space-y-4 border-t pt-4">
+    <div className="flex flex-wrap items-center gap-2"><Badge variant="success">{cached ? "cached" : "profiled"}</Badge><span className="font-mono text-xs">{result.tokenizer.class} · {compactNum(result.tokenizer.vocab_size)} tokens</span>{result.tokenizer.chat_template && <Badge variant="neutral">native chat template</Badge>}</div>
+    <div className="grid grid-cols-3 gap-2">
+      <MiniStat label="Mean" value={String(result.stats.mean)} /><MiniStat label="P95" value={String(result.stats.p95)} /><MiniStat label="Max" value={String(result.stats.max)} />
+      <MiniStat label="Truncated" value={`${result.stats.truncation_percentage}%`} /><MiniStat label="Padding" value={`${result.stats.padding_overhead_percentage}%`} /><MiniStat label="Packing" value={`${result.stats.packing_efficiency_percentage}%`} />
+    </div>
+    {result.errors.length > 0 && <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">{result.errors.length} sampled row(s) could not be rendered. First: line {result.errors[0].line}: {result.errors[0].message}</div>}
+    {result.previews[0] && <div className="space-y-2"><Label>Rendered preview and loss mask</Label><pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border bg-background/40 p-3 text-[11px]">{result.previews[0].rendered}</pre><p className="break-all font-mono text-[10px] text-muted-foreground">mask: {result.previews[0].loss_mask.slice(0, 128).join("")}</p></div>}
+  </div>;
+}
+
+function QualityPanel({ datasetId }: { datasetId: number }) {
+  const versions = useCurrentVersion(datasetId);
+  const datasets = useQuery({ queryKey: ["datasets"], queryFn: api.listDatasets });
+  const [compareDatasetId, setCompareDatasetId] = useState<number | null>(null);
+  const comparisonVersions = useQuery({
+    queryKey: ["dataset-versions", compareDatasetId],
+    queryFn: () => api.datasetVersions(compareDatasetId!),
+    enabled: compareDatasetId != null,
+  });
+  const [maxRows, setMaxRows] = useState(100000);
+  const [threshold, setThreshold] = useState(.9);
+  const quality = useMutation({ mutationFn: () => api.qualityProfile(versions.current!.id, { max_rows: maxRows, near_duplicate_threshold: threshold, compare_version_ids: comparisonVersions.data?.[0] ? [comparisonVersions.data[0].id] : [] }) });
+  const result: QualityProfileResult | undefined = quality.data?.result;
+  if (versions.error) return <ErrorPanel error={versions.error} retry={() => versions.refetch()} />;
+  return <div className="space-y-4">
+    <p className="text-xs text-muted-foreground">Runs read-only diagnostics for duplicates, conflicting answers, Unicode anomalies, markup, boilerplate, possible PII, and schema problems. No source rows are changed.</p>
+    <div className="grid grid-cols-2 gap-3"><NumberField label="Maximum rows" value={maxRows} min={1} max={1000000} onChange={value => setMaxRows(value ?? 100000)} /><NumberField label="Near-duplicate threshold" value={threshold} min={.7} max={1} step={.01} onChange={value => setThreshold(value ?? .9)} /></div>
+    <Field label="Leakage comparison (optional)" hint="Reports normalized rows also present in the selected dataset version."><Select value={compareDatasetId ?? ""} onChange={event => setCompareDatasetId(event.target.value ? Number(event.target.value) : null)}><option value="">Do not compare</option>{datasets.data?.filter(item => item.id !== datasetId).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select></Field>
+    {quality.error && <ErrorPanel error={quality.error} />}
+    <Button disabled={!versions.current || quality.isPending || (compareDatasetId != null && !comparisonVersions.data?.[0])} onClick={() => quality.mutate()}>{quality.isPending ? "Scanning…" : "Run quality scan"}</Button>
+    {result && <div className="space-y-3 border-t pt-4">
+      <div className="grid grid-cols-3 gap-2"><MiniStat label="Sampled" value={compactNum(result.sampled_rows)} /><MiniStat label="Valid" value={compactNum(result.valid_rows)} /><MiniStat label="Warnings" value={compactNum(result.warnings.reduce((sum, item) => sum + item.count, 0))} /></div>
+      {result.warnings.length === 0 ? <div className="rounded-md border border-success/40 bg-success/10 p-3 text-sm text-success">No issues found in the scanned rows.</div> : result.warnings.map(item => <details key={item.code} className="rounded-md border p-3"><summary className="cursor-pointer text-sm font-medium">{item.code.replace(/_/g, " ")} <Badge variant="warning">{item.count}</Badge></summary>{item.examples.map((example, index) => <pre key={index} className="mt-2 whitespace-pre-wrap border-t pt-2 text-[11px] text-muted-foreground">Line {example.line}: {example.text}</pre>)}</details>)}
+    </div>}
+  </div>;
 }
 
 function ValidationSummary({ report, stats }: { report: ValidationReport; stats: { num_rows: number; num_tokens_est: number; size_bytes: number } }) {

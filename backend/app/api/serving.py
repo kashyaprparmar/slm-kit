@@ -5,18 +5,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app.core.deployment import manager
 from app.db.models import ModelArtifact
 from app.db.session import engine
-from app.serving.providers import ollama
+from app.serving.providers import get_provider, ollama, provider_statuses
 
 router = APIRouter(prefix="/api/serving", tags=["serving"])
 
 @router.get("/providers")
 async def providers():
-    return {"transformers": {**manager.status(), "provider": "transformers",
-                             "capabilities": ["serve", "test", "chat", "scratch", "adapter"]},
-            "ollama": await ollama.status()}
+    return await provider_statuses()
 
 class StartBody(BaseModel):
     model: str = Field(min_length=1, max_length=300)
@@ -43,21 +40,16 @@ class TestBody(BaseModel):
 @router.post("/test")
 async def test(body: TestBody):
     try:
-        if body.provider == "ollama":
-            result = await ollama.generate(body.prompt, body.max_tokens)
-            duration = result.get("eval_duration", 0) / 1e9
-            return {"output": result.get("response", ""), "tokens": result.get("eval_count"),
-                    "seconds": duration, "tokens_per_second": result.get("eval_count", 0) / duration if duration else None}
-        if body.provider != "transformers":
-            raise HTTPException(400, "Choose a supported serving provider.")
-        if not manager.active:
-            raise HTTPException(409, "Start a model server first.")
-        from app.config import get_settings
-        async with httpx.AsyncClient(timeout=180) as client:
-            response = await client.post(f"http://127.0.0.1:{get_settings().deploy_port}/v1/chat/completions",
-                json={"messages": [{"role": "user", "content": body.prompt}], "max_tokens": body.max_tokens})
-            response.raise_for_status()
-            return {"output": response.json()["choices"][0]["message"]["content"]}
+        result = await get_provider(body.provider).generate(body.prompt, body.max_tokens)
+        duration = result.get("seconds") or result.get("eval_duration", 0) / 1e9
+        tokens = result.get("eval_count")
+        return {"output": result.get("response", ""), "tokens": tokens,
+                "seconds": duration, "tokens_per_second": tokens / duration if tokens and duration else None,
+                "provider": body.provider}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"The model server could not complete this request: {exc}") from exc
 

@@ -8,8 +8,9 @@ a polished local web UI, on a single-GPU workstation.
 Tuned and defaulted for an **RTX 4060 8GB / 16GB RAM / Ryzen 7000** box, not a
 datacenter. Every default is chosen to run on first try on that hardware.
 
-> **Status:** the complete local workflow is implemented across Dashboard, data preparation,
-> three training studios, Run History, Eval Lab, Registry, Serving, and Diagnostics.
+> **Status:** the primary local workflow is implemented across Projects, data preparation,
+> three training studios, Run History, Eval Lab, Registry, Serving, and Diagnostics. Optional
+> runtimes are capability-detected and never reported as supported merely because a package imports.
 
 ## 📚 Documentation
 
@@ -42,6 +43,7 @@ Open **http://localhost:5173**. Stop with `docker compose down`.
 | Need | Command / file |
 |------|----------------|
 | GPU training | `docker compose up --build -d` |
+| Training + dedicated vLLM | `docker compose --profile vllm up --build -d` |
 | CPU / UI only | `docker compose -f docker-compose.cpu.yml up --build -d` |
 | Hot reload | `docker compose -f docker-compose.dev.yml up --build` |
 | Logs | `docker compose logs -f` |
@@ -78,6 +80,8 @@ optional; the core loop works fully offline without any of them:
 | `SLMKIT_JUDGE_PROVIDER` | `anthropic` (default) or `openai` |
 | `SLMKIT_LLAMACPP_DIR` | llama.cpp checkout, enables GGUF export |
 | `SLMKIT_DEPLOY_PORT` | Managed OpenAI-compatible server port (default `8802`) |
+| `SLMKIT_VLLM_URL` | Dedicated vLLM OpenAI-compatible base URL |
+| `SLMKIT_VLLM_MODEL` | Model loaded when the optional vLLM Compose profile starts |
 | `SLMKIT_TRUST_REMOTE_CODE` | Opt in to executable code from trusted custom HF repositories |
 | `SLMKIT_HOME` | Data directory (Docker default `/data/slmkit`) |
 
@@ -150,7 +154,7 @@ backend/app/
   db/                SQLModel registry (runs, datasets, checkpoints, artifacts)
   core/
     queue.py         Single-GPU job queue (queued→running→done/failed/cancelled)
-    runner.py        Supervises each run as a subprocess (clean cancel frees VRAM)
+    runner.py        Supervises subprocesses; writes run.json and structured failure reports
     events.py        Newline-JSON training-event wire format
     hardware.py      pynvml + psutil telemetry over WebSocket
     ws.py            WebSocket broadcast hub
@@ -162,6 +166,8 @@ backend/app/
     estimator.py     Fallback VRAM math
     llmfit.py        llmfit shell-out with estimator fallback
     hf_hub.py        Model metadata + publish/import
+  models/
+    capabilities.py  Metadata-driven family/capability registry and truthful support states
   datasets/          Validation, token estimation, bundled samples
   train_entry/run.py Subprocess entrypoint (heavy GPU imports live here)
   api/               REST routers: system, datasets, runs, registry, advisor
@@ -172,9 +178,15 @@ backend/app/
 - **SQLModel** for the local metadata/lineage registry; **HF Hub** is the source
   of truth for published model files.
 - **Config-as-data** — every run stores its full `RunConfig` JSON, so runs are
-  reproducible and cloneable.
+  reproducible and cloneable. Each run also receives a portable `run.json` manifest;
+  failed runs receive redacted `failure.json` and `failure.md` diagnostics.
 - **Pluggable `TrainingBackend`** — optimized Unsloth and broad Transformers+PEFT engines are built in; Axolotl/LlamaFactory slot in later as pure
   `export_config` + `run` implementations with no core refactor.
+- **Capability truth over name matching** — config/tokenizer metadata selects an isolated
+  family rule and explicit `supported`, `experimental`, `unsupported`, `not_installed`,
+  or `requires_conversion` state. Repository-name hints are fallback-only.
+- **Inference provider registry** — managed Transformers, optional Ollama, and a dedicated
+  vLLM service share one normalized control-plane API. The API does not receive Docker-daemon access.
 
 ---
 
@@ -204,7 +216,8 @@ Defaults are deliberately conservative:
 - [x] Stable model references + unified full-model/PEFT/scratch evaluation and managed local deployment
 - [ ] Axolotl / LlamaFactory backends (interface is ready — `export_config` + `run`)
 
-**All 8 core pages are built.** 🎉
+Optional preference optimization, distributed training, Axolotl, LLaMA-Factory, GPTQ/AWQ
+execution, and multimodal training remain explicitly unavailable until dedicated workers are added.
 
 ### GGUF export
 

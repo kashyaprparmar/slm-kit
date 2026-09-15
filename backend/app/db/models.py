@@ -32,6 +32,86 @@ class Dataset(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class DatasetRecipe(SQLModel, table=True):
+    """Immutable transformation intent; outputs point back to this recipe."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_version_id: int = Field(foreign_key="datasetversion.id")
+    name: str
+    config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    fingerprint: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class DatasetVersion(SQLModel, table=True):
+    """Immutable reference to one source or prepared dataset file."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    dataset_id: int = Field(foreign_key="dataset.id")
+    parent_version_id: int | None = Field(default=None, foreign_key="datasetversion.id")
+    fingerprint: str
+    path: str
+    fmt: str
+    schema_info: dict = Field(default_factory=dict, sa_column=Column("schema", JSON))
+    split: str = "source"
+    num_rows: int | None = None
+    num_tokens_est: int | None = None
+    size_bytes: int | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class DatasetSplit(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    recipe_id: int = Field(foreign_key="datasetrecipe.id")
+    train_version_id: int = Field(foreign_key="datasetversion.id")
+    validation_version_id: int | None = Field(default=None, foreign_key="datasetversion.id")
+    test_version_id: int | None = Field(default=None, foreign_key="datasetversion.id")
+    seed: int
+    fractions: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    fingerprint: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class TokenizerArtifact(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    model_ref: str
+    revision: str | None = None
+    resolved_revision: str | None = None
+    fingerprint: str
+    path: str | None = None
+    config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    status: str = "ready"
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class DatasetProfile(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    dataset_version_id: int = Field(foreign_key="datasetversion.id")
+    tokenizer_artifact_id: int | None = Field(default=None, foreign_key="tokenizerartifact.id")
+    kind: str
+    cache_key: str
+    config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    stats: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class Project(SQLModel, table=True):
+    """Persistent workspace state without coupling existing run/dataset rows."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    description: str = ""
+    state: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ProjectRun(SQLModel, table=True):
+    project_id: int = Field(foreign_key="project.id", primary_key=True)
+    run_id: int = Field(foreign_key="run.id", primary_key=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class Run(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str

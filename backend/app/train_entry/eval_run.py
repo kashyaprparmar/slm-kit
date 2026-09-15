@@ -41,17 +41,14 @@ class Heartbeat:
 
 
 def _extract(row: dict) -> tuple[str, str]:
-    """Return question/reference from common instruction and chat schemas."""
-    from app.datasets.validate import normalize_row
-    row = normalize_row(row)
-    if "messages" in row and isinstance(row["messages"], list):
-        user = next((m.get("content", "") for m in row["messages"] if m.get("role") == "user"), "")
-        ref = next((m.get("content", "") for m in row["messages"] if m.get("role") == "assistant"), "")
-        return str(user), str(ref)
-    question = row.get("instruction") or row.get("prompt") or row.get("question") or ""
-    context = row.get("input") or row.get("context") or ""
-    reference = row.get("output") or row.get("response") or row.get("answer") or ""
-    return (str(question) if not context else f"{question}\n\n{context}"), str(reference)
+    """Preserve every prompt turn and hold out only the final assistant answer."""
+    from app.datasets.adapters import canonicalize
+
+    prompts, reference = canonicalize(row).training_pair()
+    # Runtime accepts structured messages, but the current eval config contract
+    # carries strings. Preserve roles explicitly until that contract is upgraded.
+    prompt = "\n".join(f"{message['role']}: {message['content']}" for message in prompts)
+    return prompt, reference
 
 
 def load_rows(dataset_id: int, limit: int) -> list[dict]:

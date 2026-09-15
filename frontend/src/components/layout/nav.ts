@@ -9,6 +9,7 @@ import {
   History,
   Server,
   Settings,
+  FolderKanban,
   type LucideIcon,
 } from "lucide-react";
 
@@ -22,6 +23,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, group: "Overview" },
   { to: "/datasets", label: "Dataset Manager", icon: Database, group: "Overview" },
+  { to: "/projects", label: "Projects", icon: FolderKanban, group: "Overview" },
   { to: "/pretrain", label: "Pretraining", icon: Boxes, group: "Studios" },
   { to: "/domain", label: "Domain Adaptation", icon: Layers, group: "Studios" },
   { to: "/finetune", label: "Fine-Tuning", icon: SlidersHorizontal, group: "Studios" },

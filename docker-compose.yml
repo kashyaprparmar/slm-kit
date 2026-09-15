@@ -25,6 +25,7 @@ services:
       SLMKIT_HOST: 0.0.0.0
       SLMKIT_PORT: 8000
       SLMKIT_DEPLOY_HOST: 0.0.0.0
+      SLMKIT_VLLM_URL: http://vllm:8000
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     env_file:
@@ -33,6 +34,36 @@ services:
     volumes:
       - slmkit-data:/data/slmkit
     gpus: all
+    restart: unless-stopped
+
+  # Dedicated inference runtime. It is intentionally opt-in because it owns
+  # substantial VRAM and has a dependency stack independent from training.
+  vllm:
+    image: vllm/vllm-openai:v0.8.5
+    container_name: slmkit-vllm
+    profiles: ["vllm", "full"]
+    command:
+      - --model
+      - ${SLMKIT_VLLM_MODEL:-HuggingFaceTB/SmolLM2-135M-Instruct}
+      - --host
+      - 0.0.0.0
+      - --gpu-memory-utilization
+      - ${SLMKIT_VLLM_GPU_MEMORY_UTILIZATION:-0.55}
+    ports:
+      - "127.0.0.1:8801:8000"
+    environment:
+      HF_HOME: /data/slmkit/hf-cache
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - slmkit-data:/data/slmkit
+    gpus: all
+    ipc: host
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/models', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
     restart: unless-stopped
 
   frontend:

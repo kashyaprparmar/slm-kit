@@ -9,6 +9,26 @@ from app.core.observability import activity
 from app.core.resources import ResourceBusy
 
 
+def normalize_failure(message: str) -> dict:
+    """Classify worker/runtime failures into stable, actionable codes."""
+    text = message.lower()
+    rules = (
+        (("out of memory", "cuda oom"), "GPU_OUT_OF_MEMORY", "RESOURCE_EXHAUSTED", ["Lower Batch Size or Context Length.", "Use QLoRA and gradient checkpointing."]),
+        (("cuda is not available", "cuda unavailable", "no nvidia"), "CUDA_UNAVAILABLE", "ENVIRONMENT_ERROR", ["Use the CPU profile or install NVIDIA Container Toolkit and verify nvidia-smi."]),
+        (("gated repo", "401 client", "403 client", "authentication"), "MODEL_ACCESS_DENIED", "ENVIRONMENT_ERROR", ["Accept the model license and configure SLMKIT_HF_TOKEN."]),
+        (("tokenizer",), "TOKENIZER_LOAD_FAILED", "CONFIGURATION_ERROR", ["Verify tokenizer files and the adapter's base model."]),
+        (("unsupported", "could not find", "architecture"), "UNSUPPORTED_MODEL", "UNSUPPORTED", ["Inspect model capabilities and choose a supported backend or architecture."]),
+        (("bitsandbytes",), "QUANTIZATION_UNAVAILABLE", "ENVIRONMENT_ERROR", ["Use the GPU training image or choose LoRA/full training without 4-bit loading."]),
+        (("no space left", "disk full"), "DISK_FULL", "RESOURCE_EXHAUSTED", ["Free space in the SLM Kit data volume and retry from a checkpoint."]),
+        (("connection", "timed out", "network"), "NETWORK_FAILURE", "RETRYABLE", ["Check connectivity and retry; cached model files will be reused."]),
+    )
+    for needles, code, category, suggestions in rules:
+        if any(needle in text for needle in needles):
+            return {"code": code, "category": category, "message": message, "retryable": category == "RETRYABLE", "suggestions": suggestions}
+    return {"code": "WORKER_FAILED", "category": "FATAL", "message": message, "retryable": False,
+            "suggestions": ["Review the recent log context and environment diagnostics before retrying."]}
+
+
 def error_payload(detail, status=500):
     suggestions = []
     message = detail if isinstance(detail, str) else "Check the highlighted configuration fields."
@@ -17,10 +37,12 @@ def error_payload(detail, status=500):
             i["message"] for i in detail.get("validation", {}).get("issues", []) if i["level"] == "error"
         ) or message
     code = {404: "NOT_FOUND", 409: "RESOURCE_BUSY", 422: "INVALID_CONFIG", 413: "UPLOAD_TOO_LARGE"}.get(status, "REQUEST_FAILED")
+    normalized = normalize_failure(message)
+    if normalized["code"] != "WORKER_FAILED":
+        code = normalized["code"]
+        suggestions = normalized["suggestions"]
     if "out of memory" in message.lower():
-        code = "GPU_OUT_OF_MEMORY"
         message = "This configuration requires more GPU memory than is available."
-        suggestions = ["Lower Batch Size and Context Length.", "Use QLoRA and gradient checkpointing."]
     elif "token" in message.lower() and "hugging face" in message.lower():
         code = "HF_TOKEN_REQUIRED"
         suggestions = ["Set SLMKIT_HF_TOKEN in backend/.env, then restart the backend."]

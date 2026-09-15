@@ -58,7 +58,66 @@ class StatusEvent(BaseModel):
     detail: str | None = None
 
 
-TrainingEvent = LogEvent | MetricEvent | CheckpointEvent | SampleEvent | StatusEvent
+class ProgressEvent(BaseModel):
+    type: Literal["progress"] = "progress"
+    ts: float = Field(default_factory=time.time)
+    current: float
+    total: float | None = None
+    unit: str = "items"
+    message: str | None = None
+
+
+class ResourceEvent(BaseModel):
+    type: Literal["resource"] = "resource"
+    ts: float = Field(default_factory=time.time)
+    resources: dict[str, float] = Field(default_factory=dict)
+
+
+class ArtifactEvent(BaseModel):
+    type: Literal["artifact"] = "artifact"
+    ts: float = Field(default_factory=time.time)
+    kind: str
+    path: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class WarningEvent(BaseModel):
+    type: Literal["warning"] = "warning"
+    ts: float = Field(default_factory=time.time)
+    code: str
+    message: str
+    action: str | None = None
+
+
+class ProfileEvent(BaseModel):
+    type: Literal["profile"] = "profile"
+    ts: float = Field(default_factory=time.time)
+    name: str
+    values: dict = Field(default_factory=dict)
+
+
+class ErrorEvent(BaseModel):
+    type: Literal["error"] = "error"
+    ts: float = Field(default_factory=time.time)
+    code: str
+    message: str
+    detail: str | None = None
+    retryable: bool = False
+
+
+TrainingEvent = (
+    LogEvent
+    | MetricEvent
+    | CheckpointEvent
+    | SampleEvent
+    | StatusEvent
+    | ProgressEvent
+    | ResourceEvent
+    | ArtifactEvent
+    | WarningEvent
+    | ProfileEvent
+    | ErrorEvent
+)
 
 _ADAPTER: TypeAdapter[TrainingEvent] = TypeAdapter(TrainingEvent)
 

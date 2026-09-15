@@ -76,6 +76,14 @@ export function RunMonitor({ runId }: { runId: number }) {
       setLatest({ step: ev.step, total: ev.total_steps, tps, eta: ev.metrics.eta_seconds, epoch: ev.metrics.epoch, lr: ev.metrics.learning_rate, vram: ev.metrics.vram_mb, elapsed: ev.metrics.elapsed_seconds });
     } else if (ev.type === "log") {
       setLiveLogs((l) => [...l.slice(-3000), { ts: ev.ts, level: ev.level, message: ev.message }]);
+    } else if (ev.type === "warning" || ev.type === "error") {
+      setLiveLogs((l) => [...l.slice(-3000), { ts: ev.ts, level: ev.type, message: `${ev.code}: ${ev.message}` }]);
+    } else if (ev.type === "artifact") {
+      setLiveLogs((l) => [...l.slice(-3000), { ts: ev.ts, level: "info", message: `Artifact ${ev.kind}: ${ev.path}` }]);
+    } else if (ev.type === "progress") {
+      setLatest((latest) => ({ ...latest, step: ev.current, total: ev.total }));
+    } else if (ev.type === "resource" && ev.resources.vram_mb != null) {
+      setLatest((latest) => ({ ...latest, vram: ev.resources.vram_mb }));
     } else if (ev.type === "sample") {
       setSamples((s) => [ev.text, ...s].slice(0, 5));
     } else if (ev.type === "status") {

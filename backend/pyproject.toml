@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "sqlmodel>=0.0.16",
+    "alembic>=1.13,<2",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "python-multipart>=0.0.9",

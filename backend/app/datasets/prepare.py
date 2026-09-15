@@ -1,67 +1,110 @@
-"""Create new prepared datasets while keeping the original file intact."""
+"""Stream input through canonical adapters into deterministic immutable splits."""
+from __future__ import annotations
+
 import hashlib
 import json
-import random
+import os
+import sqlite3
 import uuid
+from contextlib import closing
 from pathlib import Path
 
-from app.datasets.validate import (
-    _extract_text,
-    _iter_records,
-    _validate_instruction_row,
-    normalize_row,
-    validate,
-)
+from app.datasets.adapters import DatasetSchemaError, canonicalize
+from app.datasets.validate import _iter_records, validate
 from app.domain import DatasetKind
 
 
-def prepare(source, destination, kind, columns, test_fraction, shuffle, deduplicate, drop_invalid, seed):
-    rows = []
-    seen = set()
+def _stable_key(seed: int, digest: str, sequence: int) -> str:
+    return hashlib.sha256(f"{seed}:{digest}:{sequence}".encode()).hexdigest()
+
+
+def prepare(source, destination, kind, columns, test_fraction, shuffle, deduplicate,
+            drop_invalid, seed, validation_fraction=0.0):
+    """Prepare using a disk spool rather than retaining the corpus in RAM."""
+    source, destination = Path(source), Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    if test_fraction + validation_fraction > 0.8:
+        raise ValueError("Validation and test fractions must leave at least 20% for training.")
+    token = uuid.uuid4().hex
+    spool = destination / f".{token}.sqlite3"
+    staged: list[Path] = []
+    published: list[Path] = []
     dropped = 0
     corpus = kind in {DatasetKind.PRETRAIN_CORPUS, DatasetKind.DOMAIN_CORPUS}
-    for index, row in _iter_records(Path(source), Path(source).suffix.lstrip(".")):
-        if index > 100_000:
-            raise ValueError("Preparation supports up to 100,000 rows per file. Split a larger source first.")
-        if isinstance(row, dict):
-            row = normalize_row(row, columns)
-            if corpus:
-                row = {"text": _extract_text(row)}
-            valid = bool(row.get("text", "").strip()) if corpus else _validate_instruction_row(row) is None
-        else:
-            valid = False
-        if not valid:
-            if drop_invalid:
-                dropped += 1
-                continue
-            raise ValueError(f"Row {index} is invalid after column mapping. Correct the mapping or enable Skip invalid rows.")
-        fingerprint = hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
-        if deduplicate and fingerprint in seen:
-            dropped += 1
-            continue
-        seen.add(fingerprint)
-        rows.append(row)
-    if len(rows) < (2 if test_fraction else 1):
-        raise ValueError("Not enough valid rows remain to create the requested split.")
-    if shuffle:
-        random.Random(seed).shuffle(rows)
-    n_test = max(1, round(len(rows) * test_fraction)) if test_fraction else 0
-    splits = [("train", rows[n_test:]), ("test", rows[:n_test])] if n_test else [("train", rows)]
-    paths = []
     try:
-        for name, items in splits:
-            path = Path(destination) / f"prepared-{uuid.uuid4().hex}-{name}.{'txt' if corpus else 'jsonl'}"
-            paths.append(path)
-            with path.open("x", encoding="utf-8") as stream:
-                for row in items:
-                    stream.write((row["text"] if corpus else json.dumps(row, ensure_ascii=False)) + "\n")
-        results = []
-        for (name, _), path in zip(splits, paths, strict=True):
-            output_kind = kind if corpus or name == "train" else DatasetKind.EVAL
-            report, stats = validate(path, output_kind)
-            results.append((name, path, output_kind, report, stats))
+        # sqlite3.Connection's context manager commits/rolls back but does not
+        # close the handle. ``closing`` is required for reliable Windows cleanup.
+        with closing(sqlite3.connect(spool)) as db:
+            db.execute("PRAGMA journal_mode=OFF")
+            db.execute("CREATE TABLE rows (sequence INTEGER PRIMARY KEY, digest TEXT, sort_key TEXT, payload TEXT)")
+            if deduplicate:
+                db.execute("CREATE UNIQUE INDEX uq_rows_digest ON rows(digest)")
+            accepted = 0
+            for index, row in _iter_records(source, source.suffix.lower().lstrip(".")):
+                try:
+                    record = canonicalize(row, columns) if isinstance(row, dict) else None
+                    if record is None:
+                        raise DatasetSchemaError("Row is not an object.")
+                    payload = {"text": record.content_text()} if corpus else record.storage_row()
+                    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    digest = hashlib.sha256(encoded.encode()).hexdigest()
+                    cursor = db.execute(
+                        "INSERT OR IGNORE INTO rows(sequence,digest,sort_key,payload) VALUES(?,?,?,?)",
+                        (accepted, digest, _stable_key(seed, digest, accepted), encoded),
+                    )
+                    if cursor.rowcount == 0:
+                        dropped += 1
+                    else:
+                        accepted += 1
+                except (DatasetSchemaError, TypeError, ValueError) as exc:
+                    if drop_invalid:
+                        dropped += 1
+                        continue
+                    raise ValueError(f"Row {index} is invalid after column mapping: {exc}") from exc
+            db.commit()
+            count = int(db.execute("SELECT COUNT(*) FROM rows").fetchone()[0])
+            n_test, n_validation = round(count * test_fraction), round(count * validation_fraction)
+            requested = [("train", count - n_validation - n_test)]
+            if validation_fraction:
+                requested.append(("validation", n_validation))
+            if test_fraction:
+                requested.append(("test", n_test))
+            if count < 1 or any(size < 1 for _, size in requested):
+                raise ValueError("Not enough valid rows remain to create every requested split.")
+            order = "sort_key, sequence" if shuffle else "sequence"
+            cursor = db.execute(f"SELECT payload FROM rows ORDER BY {order}")  # noqa: S608
+            suffix = "txt" if corpus else "jsonl"
+            results = []
+            try:
+                for split, size in requested:
+                    final = destination / f"prepared-{token}-{split}.{suffix}"
+                    stage = final.with_suffix(final.suffix + ".part")
+                    staged.append(stage)
+                    with stage.open("x", encoding="utf-8", newline="\n") as stream:
+                        for _ in range(size):
+                            item = cursor.fetchone()
+                            if item is None:
+                                raise RuntimeError("Preparation spool ended before split output was complete.")
+                            payload = json.loads(item[0])
+                            stream.write((payload["text"] if corpus else json.dumps(payload, ensure_ascii=False)) + "\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(stage, final)
+                    published.append(final)
+                    output_kind = kind if corpus or split == "train" else DatasetKind.EVAL
+                    report, stats = validate(final, output_kind)
+                    if not report.ok:
+                        errors = "; ".join(i.message for i in report.issues if i.level == "error")
+                        raise ValueError(f"Prepared {split} split failed validation: {errors}")
+                    results.append((split, final, output_kind, report, stats))
+            finally:
+                # A live sqlite cursor retains a file handle on Windows even after
+                # the connection context commits, preventing deterministic cleanup.
+                cursor.close()
         return results, dropped
     except Exception:
-        for path in paths:
+        for path in [*staged, *published]:
             path.unlink(missing_ok=True)
         raise
+    finally:
+        spool.unlink(missing_ok=True)

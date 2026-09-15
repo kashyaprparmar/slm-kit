@@ -1,5 +1,37 @@
 # Dataset Manager
 
+## Data Lab
+
+`GET /api/datasets/{id}/schema?limit=20` provides a read-only canonical preview
+of up to 100 rows. It recognizes raw text, instruction/input/output,
+prompt/response, question/answer, prompt/completion, messages, and ShareGPT.
+It preserves multilingual text and all conversation turns, and reports malformed
+roles, ambiguous formats, and missing/empty values.
+
+Preference, tool-calling, and pre-tokenized formats are recognized but gated:
+their dedicated workers are not implemented, so they cannot accidentally be
+flattened into ordinary SFT data. A successful schema preview is a bounded
+sample, not full-dataset or model-runtime validation.
+
+After selecting a dataset, the right-side Data Lab has four tabs:
+
+- **Schema** keeps the validation summary, distribution, and source samples.
+- **Prepare & lineage** publishes deterministic train/validation/test outputs,
+  records their SHA-256 versions and recipe, and can replay the recipe. The
+  source and prior outputs are never overwritten. Exact recipe replays reuse the
+  prior output records after checking that their files still exist.
+- **Tokenizer** runs the selected model tokenizer in an isolated worker. It
+  reports length percentiles, truncation, padding and packing estimates,
+  multilingual slices, rendered text, IDs, and the exact training loss mask.
+  This requires the optional Transformers training stack.
+- **Quality** performs a read-only bounded scan for duplicates, conflicting
+  answers, Unicode/control/markup/whitespace problems, repeated boilerplate,
+  possible email/phone PII, and optional leakage against another dataset. Every
+  warning includes example evidence; the scanner never cleans data silently.
+
+JSON-array previews are capped at 16 MB because the current JSON parser is eager.
+Use JSONL for streamed inspection of larger files. No source file is modified.
+
 Upload, validate, and preview your data **before** it ever feeds a run. Bad data
 is the #1 cause of wasted training time, so this page checks it first.
 
@@ -37,7 +69,7 @@ Any of these per row works (the app auto-detects the fields):
 Filenames are sanitized and de-duplicated automatically — uploading two files
 named the same won't overwrite anything.
 
-## The validation report (right panel)
+## The schema report
 
 Select any dataset to see:
 
@@ -78,3 +110,7 @@ Sample datasets are marked with a "sample" tag and can't be deleted.
   run on an invalid dataset.
 - Use the token histogram to choose a sensible **max sequence length** in the
   studio (don't pay for 2048 tokens if your rows are 200).
+- Profile with the same model revision, maximum length, chat template, and loss
+  policy you will use for training. The cache key includes all of those inputs.
+- Prefer JSONL for large sources. Preparation streams through a disk-backed
+  spool; JSON arrays still use the bounded eager parser described above.

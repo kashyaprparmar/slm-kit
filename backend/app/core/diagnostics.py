@@ -1,10 +1,9 @@
 """Import-light configuration checks; installed does not imply GPU compatibility."""
-import importlib.metadata
 import platform
-import shutil
 import subprocess
 import sys
 
+from app.capabilities import dependency_statuses
 from app.config import get_settings
 from app.core.hardware import read_hardware
 from app.integrations.gguf import llamacpp_available
@@ -19,13 +18,11 @@ def checks():
              "detail": hw.gpu_name or "No NVIDIA GPU detected", "guidance": "GPU training needs an NVIDIA driver and CUDA-compatible PyTorch. CPU scratch training remains available."},
             {"name": "Disk", "status": "ready" if (hw.disk_free_mb or 0) > 10240 else "warning",
              "detail": f"{hw.disk_free_mb} MB free", "guidance": "Allow room for base weights, checkpoints and exports."}]
+    dependencies = dependency_statuses()
     for package in ("torch", "transformers", "peft", "trl", "unsloth", "bitsandbytes", "tokenizers", "datasets", "pyarrow"):
-        try:
-            version = importlib.metadata.version(package)
-            status = "ready"
-        except importlib.metadata.PackageNotFoundError:
-            version, status = "Not installed", "optional" if package in {"unsloth", "pyarrow"} else "missing"
-        rows.append({"name": package, "status": status, "detail": version,
+        dependency = dependencies[package]
+        status = "ready" if dependency.installed else "optional" if dependency.optional else "missing"
+        rows.append({"name": package, "status": status, "detail": dependency.version or "Not installed",
                      "guidance": "Package presence only; use the runtime check to verify imports and CUDA. Install the [gpu] extra for training."})
     try:
         runtime = subprocess.run(
@@ -46,7 +43,7 @@ def checks():
         ("llama.cpp", llamacpp_available(), "Set SLMKIT_LLAMACPP_DIR to a built llama.cpp checkout."),
         ("Hugging Face token", bool(_token()), "Set SLMKIT_HF_TOKEN for private repositories or publishing. Requires restart."),
         ("Judge", bool(settings.judge_api_key), "Optional: configure SLMKIT_JUDGE_API_KEY. Evaluation metrics work without it."),
-        ("Ollama CLI", bool(shutil.which("ollama")), "Optional: install Ollama on the host. Use Model Serving to check its HTTP service."),
+        ("Ollama CLI", dependencies["ollama"].installed, "Optional: install Ollama on the host. Use Model Serving to check its HTTP service."),
     ]:
         rows.append({"name": name, "status": "ready" if ready else "optional", "detail": "Configured" if ready else "Not configured", "guidance": guidance})
     return {"checks": rows, "hardware": hw, "platform": platform.platform(), "home": str(settings.home)}

@@ -16,7 +16,7 @@ def recommend_settings(cfg: RunConfig, hw: HardwareProfile, preset: str, rows=0,
             return ScratchBackend().estimate_footprint(candidate, hw)
     else:
         resolved = resolve_model_ref(cfg.base_model)
-        spec = get_model_spec(resolved.base_model or resolved.load_ref)
+        spec = get_model_spec(resolved.base_model or resolved.load_ref, None if resolved.kind == "adapter" else cfg.revision)
 
         def estimate(candidate):
             return estimator.estimate(candidate, hw, spec)

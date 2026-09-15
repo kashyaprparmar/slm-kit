@@ -236,6 +236,41 @@ async def inspect_model(body: InspectBody):
     return metadata
 
 
+class PreflightBody(BaseModel):
+    model_ref: str
+    revision: str | None = None
+    backend: str = "unsloth"
+    load_in_4bit: bool = False
+
+
+@router.post("/preflight")
+async def model_preflight(body: PreflightBody):
+    """Run isolated subprocess runtime preflight holding GPU lease."""
+    from app.core.preflight import preflight_runner
+    from app.core.resources import ResourceBusy
+
+    try:
+        resolved = resolve_model_ref(body.model_ref)
+    except ModelReferenceError as exc:
+        raise HTTPException(400, str(exc))
+
+    try:
+        result = await preflight_runner.execute(
+            model_ref=resolved.load_ref,
+            revision=body.revision,
+            backend=body.backend,
+            load_in_4bit=body.load_in_4bit,
+        )
+    except ResourceBusy as exc:
+        raise HTTPException(409, str(exc))
+
+    result["model_ref"] = body.model_ref
+    result["resolved"] = resolved.public()
+    if not result.get("ok"):
+        raise HTTPException(422, detail=result)
+    return result
+
+
 class DeployBody(BaseModel):
     model_ref: str
 
@@ -261,6 +296,11 @@ async def deploy(body: DeployBody):
     current = eval_manager.current()
     if current and current.get("kind") in {"eval", "gen"}:
         raise HTTPException(409, "GPU is busy with an evaluation or playground request.")
+    from app.serving.providers import external_gpu_owner
+
+    owner = await external_gpu_owner()
+    if owner:
+        raise HTTPException(409, f"GPU is already in use by external provider '{owner}'. Stop it before deploying this model.")
     # A warm playground vLLM server is idle, so replace it rather than making
     # the user hunt for a separate stop control.
     if vllm_serve.manager.model is not None:
@@ -292,6 +332,11 @@ async def merge_adapter(body: MergeBody):
         raise HTTPException(400, str(exc))
     if resolved.kind != "adapter":
         raise HTTPException(422, "Only a PEFT/LoRA adapter can be merged. Full models are already standalone.")
+    from app.serving.providers import external_gpu_owner
+
+    owner = await external_gpu_owner()
+    if owner:
+        raise HTTPException(409, f"GPU is already in use by external provider '{owner}'. Stop it before merging an adapter.")
     try:
         lease = gpu.acquire("merging", body.model_ref)
     except ResourceBusy as exc:

@@ -28,6 +28,9 @@ export interface RunForm {
   max_seq_length: number;
   save_steps: number;
   logging_steps: number;
+  tokenizer_mode: "reuse";
+  loss_policy: "full_sequence" | "completion_only" | "assistant_only";
+  chat_template: string;
 }
 
 export function defaultForm(overrides: Partial<RunForm> = {}): RunForm {
@@ -55,6 +58,9 @@ export function defaultForm(overrides: Partial<RunForm> = {}): RunForm {
     max_seq_length: 1024,
     save_steps: 100,
     logging_steps: 5,
+    tokenizer_mode: "reuse",
+    loss_policy: "full_sequence",
+    chat_template: "",
     ...overrides,
   };
 }
@@ -104,7 +110,7 @@ export function toPretrainPayload(f: PretrainForm): Record<string, unknown> {
     method: "full",
     base_model: "",
     dataset_id: f.dataset_id,
-    output_name: f.output_name.trim() || "my-scratch-llm",
+    output_name: (f.output_name ?? "").trim() || "my-scratch-llm",
     arch: {
       vocab_size: f.vocab_size,
       n_layers: f.n_layers,
@@ -129,10 +135,11 @@ export function formFromConfig(config: Record<string, unknown>): RunForm {
   const train = (config.train ?? {}) as Record<string, unknown>;
   const optim = (config.optim ?? {}) as Record<string, unknown>;
   const lora = (config.lora ?? {}) as Record<string, unknown>;
+  const tokenizer = (config.tokenizer ?? {}) as Record<string, unknown>;
   const defaults = defaultForm();
   const result = { ...defaults };
   for (const key of Object.keys(defaults) as (keyof RunForm)[]) {
-    const value = config[key] ?? train[key] ?? optim[key] ?? lora[key];
+    const value = config[key] ?? train[key] ?? optim[key] ?? lora[key] ?? tokenizer[key];
     if (value !== undefined) Object.assign(result, { [key]: value });
   }
   result.revision = typeof config.revision === "string" ? config.revision : "";
@@ -145,11 +152,11 @@ export function toPayload(f: RunForm): Record<string, unknown> {
     backend: f.backend,
     task: f.task,
     method: f.method,
-    base_model: f.base_model.trim(),
+    base_model: (f.base_model ?? "").trim(),
     revision: f.revision?.trim() || null,
     gradient_checkpointing: f.gradient_checkpointing ?? true,
     dataset_id: f.dataset_id,
-    output_name: f.output_name.trim() || "my-finetune",
+    output_name: (f.output_name ?? "").trim() || "my-finetune",
     load_in_4bit: f.method === "qlora",
     lora: {
       r: f.r,
@@ -172,6 +179,11 @@ export function toPayload(f: RunForm): Record<string, unknown> {
       max_seq_length: f.max_seq_length,
       save_steps: f.save_steps,
       logging_steps: f.logging_steps,
+    },
+    tokenizer: {
+      mode: f.tokenizer_mode ?? "reuse",
+      loss_policy: f.loss_policy ?? "full_sequence",
+      chat_template: (f.chat_template ?? "").trim() || null,
     },
   };
 }

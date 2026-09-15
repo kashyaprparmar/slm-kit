@@ -16,8 +16,16 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
+from pydantic import BaseModel, Field
+
+from app.capabilities import (
+    Capability,
+    PeftMethodCapability,
+    QuantizationCapability,
+    TokenizerCapabilities,
+)
 from app.core.events import TrainingEvent
 from app.domain import (
     ExportedConfig,
@@ -49,11 +57,68 @@ class RunContext:
         return (self.workdir / "STOP").exists()
 
 
+class TrainingBackendCapabilities(BaseModel):
+    """Authoritative backend contract returned by the API and used to validate runs."""
+
+    schema_version: Literal[1] = 1
+    name: str
+    display_name: str
+    description: str
+    availability: Capability
+    tasks: dict[str, Capability]
+    stages: dict[str, Capability]
+    methods: dict[str, Capability]
+    tokenizer: TokenizerCapabilities
+    peft: dict[str, PeftMethodCapability] = Field(default_factory=dict)
+    quantization: dict[str, QuantizationCapability] = Field(default_factory=dict)
+    platforms: list[str] = Field(default_factory=list)
+    architectures: list[str] = Field(default_factory=list)
+    required_dependencies: list[str] = Field(default_factory=list)
+    optional_dependencies: list[str] = Field(default_factory=list)
+
+    def supports_task(self, task: TaskType) -> bool:
+        capability = self.tasks.get(task.value)
+        return bool(capability and capability.allowed)
+
+    def supports_method(self, method: Method) -> bool:
+        capability = self.methods.get(method.value)
+        return bool(capability and capability.allowed)
+
+    def validate_operation(self, cfg: RunConfig, report: ValidationReport) -> None:
+        if not self.supports_task(cfg.task):
+            report.error(f"{self.name} backend does not support task '{cfg.task.value}'.")
+        if not self.supports_method(cfg.method):
+            capability = self.methods.get(cfg.method.value)
+            reason = f" {capability.reason}" if capability else ""
+            report.error(f"{self.name} backend does not support method '{cfg.method.value}'.{reason}")
+
+    def validate_availability(self, report: ValidationReport, *, required: bool) -> None:
+        if self.availability.allowed:
+            return
+        message = f"Backend '{self.name}' is unavailable: {self.availability.reason}"
+        report.error(message) if required else report.warn(message)
+
+    @property
+    def supported_tasks(self) -> set[TaskType]:
+        return {task for task in TaskType if self.supports_task(task)}
+
+    @property
+    def supported_methods(self) -> set[Method]:
+        return {method for method in Method if self.supports_method(method)}
+
+
 @runtime_checkable
 class TrainingBackend(Protocol):
     name: str
-    supported_tasks: set[TaskType]
-    supported_methods: set[Method]
+
+    @property
+    def supported_tasks(self) -> set[TaskType]: ...
+
+    @property
+    def supported_methods(self) -> set[Method]: ...
+
+    def capabilities(self) -> TrainingBackendCapabilities:
+        ...
 
     def validate_config(self, cfg: RunConfig, hw: HardwareProfile) -> ValidationReport:
         ...
@@ -88,6 +153,32 @@ def list_backends() -> list[TrainingBackend]:
     return list(_REGISTRY.values())
 
 
+@dataclass(frozen=True)
+class BackendSelection:
+    backend: TrainingBackend
+    capabilities: TrainingBackendCapabilities
+
+
+class BackendSelector(Protocol):
+    def select(self, cfg: RunConfig) -> BackendSelection: ...
+
+
+class RegisteredBackendSelector:
+    """Select an explicitly requested registered backend.
+
+    Automatic selection is intentionally deferred until the scheduler has
+    enough runtime evidence to make a reliable decision.
+    """
+
+    def select(self, cfg: RunConfig) -> BackendSelection:
+        backend = get_backend(cfg.backend)
+        capabilities = backend.capabilities()
+        return BackendSelection(backend=backend, capabilities=capabilities)
+
+
+backend_selector: BackendSelector = RegisteredBackendSelector()
+
+
 def load_builtin_backends() -> None:
     """Import + register the built-in backends.
 
@@ -98,7 +189,5 @@ def load_builtin_backends() -> None:
     from app.backends import scratch_backend, unsloth_backend
 
     register_backend(unsloth_backend.UnslothBackend())
-    generic = unsloth_backend.UnslothBackend()
-    generic.name = "transformers"
-    register_backend(generic)
+    register_backend(unsloth_backend.UnslothBackend(name="transformers"))
     register_backend(scratch_backend.ScratchBackend())

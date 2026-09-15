@@ -134,4 +134,9 @@ def install_samples() -> list[Dataset]:
         db.commit()
         for row in installed:
             db.refresh(row)
+        from app.datasets.lineage import register_version
+
+        for row in installed:
+            register_version(db, row, schema={"source": "bundled_sample"})
+        db.commit()
     return installed

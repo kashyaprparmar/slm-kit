@@ -1,12 +1,13 @@
 # Docker
 
-Recommended way to run SLM Kit. Two containers:
+Recommended way to run SLM Kit. Two core containers plus an optional vLLM service:
 
 | Service | Image | Host port | Role |
 |---|---|---|---|
 | `backend` | `slmkit-backend` | **8000** | FastAPI + training (GPU image) or API-only (CPU image) |
 | `frontend` | `slmkit-frontend` | **5173** | nginx (prod) or Vite (dev). Proxies `/api` and `/ws` to the backend |
 | managed model server | child of `backend` | **8802** (loopback only) | OpenAI-compatible endpoint while a model is deployed |
+| `vllm` (optional) | `vllm/vllm-openai:v0.8.5` | **8801** (loopback only) | Dedicated OpenAI-compatible server (`vllm` profile) |
 
 ```
 Browser  →  http://localhost:5173
@@ -51,8 +52,28 @@ Verify inside the container:
 
 ```powershell
 docker exec slmkit-backend python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-# expect something like: 2.14.0+cu130 True
+# expect something like: 2.11.0+cu128 True
 ```
+
+The default compose file passes `gpus: all` to the backend. If the command
+reports `False`, verify Docker Desktop GPU support and the host NVIDIA driver
+before launching a training run.
+
+### Dedicated vLLM service (optional)
+
+Run vLLM only when you want a separate, OpenAI-compatible inference server:
+
+```powershell
+docker compose --profile vllm up -d vllm
+docker compose --profile vllm ps
+curl http://127.0.0.1:8801/v1/models
+docker compose --profile vllm stop vllm
+```
+
+Set `SLMKIT_VLLM_MODEL` (and optionally
+`SLMKIT_VLLM_GPU_MEMORY_UTILIZATION`) before starting the profile. vLLM owns
+substantial VRAM; SLM Kit reports a conflict and returns `409` for operations
+that require the same GPU until the external server stops.
 
 ---
 

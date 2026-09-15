@@ -11,6 +11,17 @@ At the top, two badges tell you what's available:
 
 See [Configuration](../configuration.md) to enable either.
 
+## Inspect compatibility
+
+Before training, evaluating, or deploying a custom checkpoint, use the
+compatibility inspector. It reports the architecture, model family, supported
+methods/providers, quantization support, and whether the result is
+`supported`, `experimental`, or `unsupported`. Hugging Face metadata is cached
+by revision, so changing a revision triggers a fresh capability check.
+
+The same model reference can be reused across Fine-Tuning Studio, Eval Lab,
+GGUF export, and serving without copying files.
+
 ## Left side — "Trained here"
 
 ### Ready to publish

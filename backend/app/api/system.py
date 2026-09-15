@@ -7,11 +7,14 @@ from collections import deque
 from fastapi import APIRouter
 
 from app.config import get_settings
+from app.core.cpu_jobs import cpu_jobs
 from app.core.diagnostics import checks
 from app.core.hardware import read_hardware
 from app.core.observability import activity
 from app.core.queue import queue
+from app.db.migrate import DatabaseDiagnostics
 from app.integrations import llmfit
+from app.serving.providers import provider_statuses
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 _settings = get_settings()
@@ -38,6 +41,38 @@ def status():
 @router.get("/diagnostics")
 def diagnostics():
     return checks()
+
+
+@router.get("/database", response_model=DatabaseDiagnostics)
+def database():
+    from app.db.migrate import database_diagnostics
+    from app.db.session import engine
+
+    return database_diagnostics(engine)
+
+
+@router.get("/services")
+async def services():
+    from sqlalchemy import text
+
+    from app.db.session import engine
+
+    provider_states = await provider_statuses()
+    resource = queue.snapshot().get("resource") or {"kind": "idle"}
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        database = {"status": "ready", "engine": "sqlite"}
+    except Exception as exc:
+        database = {"status": "error", "engine": "sqlite", "error": str(exc)}
+    return {
+        "api": {"status": "ready"},
+        "database": database,
+        "training_worker": {"status": "busy" if queue.current_id else "ready" if queue.healthy else "error", "run_id": queue.current_id},
+        "gpu_resource": resource,
+        "cpu_jobs": cpu_jobs.snapshot(),
+        "providers": provider_states,
+    }
 
 
 @router.get("/activity")

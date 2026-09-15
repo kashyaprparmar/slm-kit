@@ -26,6 +26,7 @@ export default function Pretrain() {
   const [form, setForm] = useWorkflow<PretrainForm>("pretrain.form", defaultPretrainForm());
   const [presetKey, setPresetKey] = useWorkflow("pretrain.preset", "tiny");
   const [launchedRunId, setLaunchedRunId] = useWorkflow<number | null>("pretrain.run", null, false);
+  const [activeProject] = useWorkflow<number | null>("active-project", null);
   const set = <K extends keyof PretrainForm>(k: K, v: PretrainForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   function applyPreset(p: ArchPreset) {
@@ -38,7 +39,7 @@ export default function Pretrain() {
     [form.vocab_size, form.n_embd, form.n_layers],
   );
 
-  const payload = useMemo(() => toPretrainPayload(form), [form]);
+  const payload = useMemo(() => ({ ...toPretrainPayload(form), extra: activeProject ? { project_id: activeProject } : {} }), [form, activeProject]);
   const debounced = useDebouncedValue(JSON.stringify(payload), 450);
   const estimate = useQuery({ queryKey: ["estimate", debounced], queryFn: () => api.estimate(JSON.parse(debounced)) });
 

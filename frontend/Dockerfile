@@ -1,7 +1,7 @@
 # Production frontend — builds static assets and serves them via nginx,
 # proxying /api and /ws to the backend container.
 
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 
 WORKDIR /app
 

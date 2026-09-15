@@ -51,35 +51,21 @@ def estimate_tokens(text: str) -> int:
 
 
 def _extract_text(row: dict) -> str:
-    row = normalize_row(row)
-    if "messages" in row and isinstance(row["messages"], list):
-        return " ".join(str(m.get("content", "")) for m in row["messages"] if isinstance(m, dict))
-    keys = ("instruction", "input", "context", "prompt", "question",
-            "output", "response", "answer", "text")
-    return " ".join(str(row.get(k, "")) for k in keys if row.get(k))
+    from app.datasets.adapters import canonicalize
+
+    return canonicalize(row).content_text()
 
 
 def _validate_instruction_row(row: dict) -> str | None:
     """Return an error string if the row isn't a usable instruction/chat example."""
-    row = normalize_row(row)
-    if "messages" in row:
-        msgs = row["messages"]
-        if not isinstance(msgs, list) or not msgs:
-            return "'messages' must be a non-empty list"
-        for m in msgs:
-            if not isinstance(m, dict) or "role" not in m or "content" not in m:
-                return "each message needs 'role' and 'content'"
-            if m["role"] not in {"system", "user", "assistant", "tool"} or not isinstance(m["content"], str) or not m["content"].strip():
-                return "messages need a valid role and non-empty text content"
-        if not any(m["role"] == "assistant" for m in msgs):
-            return "chat data needs an assistant response to learn from"
-        return None
-    has_prompt = any(row.get(k) for k in ("instruction", "prompt", "question"))
-    has_answer = any(row.get(k) for k in ("output", "response", "answer"))
-    if not has_prompt:
-        return "missing an instruction/prompt/question field"
-    if not has_answer:
-        return "missing an output/response/answer field"
+    from app.datasets.adapters import DatasetSchemaError, canonicalize
+
+    try:
+        record = canonicalize(row)
+        if record.kind != "conversation":
+            return "instruction/evaluation data requires a prompt and assistant response"
+    except DatasetSchemaError as exc:
+        return str(exc)
     return None
 
 
@@ -128,7 +114,12 @@ def _validate_corpus(path: Path, kind: DatasetKind, report: ValidationReport, st
             if stats.invalid_rows >= 20:
                 break
             continue
-        text = _extract_text(row)
+        try:
+            text = _extract_text(row)
+        except ValueError as exc:
+            report.error(str(exc), line=line)
+            stats.invalid_rows += 1
+            continue
         if not text.strip():
             stats.empty_rows += 1
             continue
@@ -207,8 +198,6 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
             errors += 1
             continue
         stats.columns = list(dict.fromkeys([*stats.columns, *row.keys()]))
-        row = normalize_row(row)
-
         if kind == DatasetKind.INSTRUCTION or kind == DatasetKind.EVAL:
             err = _validate_instruction_row(row)
             if err and errors < 20:
@@ -217,7 +206,10 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
             if err:
                 stats.invalid_rows += 1
 
-        text = _extract_text(row)
+        try:
+            text = _extract_text(row)
+        except ValueError:
+            text = ""
         toks = estimate_tokens(text)
         if not text.strip():
             stats.empty_rows += 1
@@ -258,12 +250,7 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
 
 
 def normalize_row(row: dict, columns: dict | None = None) -> dict:
-    if columns:
-        return {target: row.get(source, "") for target, source in columns.items() if source}
-    conversations = row.get("conversations")
-    if isinstance(conversations, list):
-        roles = {"human": "user", "gpt": "assistant", "system": "system", "user": "user", "assistant": "assistant"}
-        return {"messages": [{"role": roles.get(m.get("from", m.get("role")), "unknown"),
-                              "content": m.get("value", m.get("content", ""))}
-                             if isinstance(m, dict) else {} for m in conversations]}
-    return row
+    """Compatibility helper. New code should consume ``CanonicalRecord``."""
+    from app.datasets.adapters import canonicalize
+
+    return canonicalize(row, columns).storage_row()

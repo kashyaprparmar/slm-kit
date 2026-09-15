@@ -14,7 +14,16 @@ import threading
 import time
 from collections.abc import Iterator
 
-from app.backends.base import RunContext
+from app.backends.base import RunContext, TrainingBackendCapabilities
+from app.capabilities import (
+    Capability,
+    ChatTemplateCapabilities,
+    PeftMethodCapability,
+    QuantizationCapability,
+    SupportState,
+    TokenizerCapabilities,
+    dependency_statuses,
+)
 from app.core.events import (
     CheckpointEvent,
     LogEvent,
@@ -39,13 +48,67 @@ _SENTINEL = object()
 
 class ScratchBackend:
     name = "scratch"
-    supported_tasks = {TaskType.PRETRAIN}
-    supported_methods = {Method.FULL}
+
+    def capabilities(self) -> TrainingBackendCapabilities:
+        dependencies = dependency_statuses()
+        required = ["torch", "tokenizers"]
+        missing = [name for name in required if not dependencies[name].installed]
+        availability = Capability(
+            state=SupportState.MISSING_DEPENDENCY if missing else SupportState.SUPPORTED,
+            reason=(f"Missing required packages: {', '.join(missing)}." if missing else "Built-in from-scratch trainer is available."),
+            requirements=required,
+        )
+        supported = Capability(state=SupportState.SUPPORTED, reason="Implemented by the scratch training loop.")
+        unsupported = Capability(state=SupportState.UNSUPPORTED, reason="The scratch backend only initializes a new SLM Kit GPT.")
+        return TrainingBackendCapabilities(
+            name=self.name,
+            display_name="From scratch",
+            description="Train a small decoder-only GPT and tokenizer from an uninitialized architecture.",
+            availability=availability,
+            tasks={task.value: (supported if task == TaskType.PRETRAIN else unsupported) for task in TaskType},
+            stages={
+                "from_scratch_pretraining": supported,
+                "continued_pretraining": unsupported,
+                "supervised_fine_tuning": unsupported,
+                "alignment": unsupported,
+            },
+            methods={method.value: (supported if method == Method.FULL else unsupported) for method in Method},
+            tokenizer=TokenizerCapabilities(
+                modes={"reuse": unsupported, "extend": unsupported, "train": supported},
+                loss_policies={
+                    "full_sequence": supported,
+                    "completion_only": unsupported,
+                    "assistant_only": unsupported,
+                },
+                templates=ChatTemplateCapabilities(
+                    native=unsupported,
+                    explicit_override=unsupported,
+                    fallback=unsupported,
+                ),
+            ),
+            peft={
+                method.value: PeftMethodCapability(method=method.value, support=unsupported)
+                for method in (Method.LORA, Method.QLORA, Method.DORA, Method.PROMPT_TUNING)
+            },
+            quantization={
+                "fp32": QuantizationCapability(format="fp32", operations=["train"], support=supported),
+            },
+            platforms=["linux", "windows", "wsl"],
+            architectures=["SLM Kit GPT"],
+            required_dependencies=required,
+        )
+
+    @property
+    def supported_tasks(self) -> set[TaskType]:
+        return self.capabilities().supported_tasks
+
+    @property
+    def supported_methods(self) -> set[Method]:
+        return self.capabilities().supported_methods
 
     def validate_config(self, cfg: RunConfig, hw: HardwareProfile) -> ValidationReport:
         report = ValidationReport()
-        if cfg.task != TaskType.PRETRAIN:
-            report.error("The scratch backend only supports from-scratch pretraining.")
+        self.capabilities().validate_operation(cfg, report)
         if cfg.dataset_id is None:
             report.error("A text corpus dataset is required for pretraining.")
         arch = cfg.arch or ScratchArch()

@@ -15,6 +15,7 @@ const Registry = lazy(() => import("@/pages/Registry"));
 const EvalLab = lazy(() => import("@/pages/EvalLab"));
 const Serving = lazy(() => import("@/pages/Serving"));
 const System = lazy(() => import("@/pages/System"));
+const Projects = lazy(() => import("@/pages/Projects"));
 
 function PageFallback() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/datasets" element={<Datasets />} />
+          <Route path="/projects" element={<Projects />} />
           <Route path="/pretrain" element={<Pretrain />} />
           <Route path="/domain" element={<DomainAdaptation />} />
           <Route path="/finetune" element={<Finetune />} />

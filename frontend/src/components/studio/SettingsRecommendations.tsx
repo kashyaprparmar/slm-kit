@@ -17,7 +17,7 @@ export function SettingsRecommendations({ form, onApply }: { form: RunForm; onAp
     <div className="flex flex-wrap gap-2"><Select className="min-w-32 flex-1" aria-label="Training preset" value={preset} onChange={e => setPreset(e.target.value)}>
       <option value="fast">Fast</option><option value="balanced">Balanced</option><option value="best_quality">Best Quality</option><option value="lowest_memory">Lowest Memory</option>
       <option value="custom">Custom / manual</option>
-    </Select><Button variant="secondary" disabled={preset === "custom" || recommendation.isPending || !form.base_model.trim()} onClick={() => recommendation.mutate()}>{recommendation.isPending ? "Calculating…" : preset === "custom" ? "Manual settings" : "Recommend Settings"}</Button></div>
+    </Select><Button variant="secondary" disabled={preset === "custom" || recommendation.isPending || !form.base_model?.trim()} onClick={() => recommendation.mutate()}>{recommendation.isPending ? "Calculating…" : preset === "custom" ? "Manual settings" : "Recommend Settings"}</Button></div>
     <p className="text-xs text-muted-foreground">Uses model size, dataset length and current hardware. You can adjust every setting afterward.</p>
     {recommendation.error && <ErrorPanel error={recommendation.error} />}
     {recommendation.data && <details><summary className="cursor-pointer text-xs font-medium">Why these settings?</summary><div className="mt-2 space-y-2">

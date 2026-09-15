@@ -165,6 +165,11 @@ class EvalManager:
 
     # ---- Eval harness --------------------------------------------------
     async def start_eval(self, config: dict) -> int:
+        from app.serving.providers import external_gpu_owner
+
+        owner = await external_gpu_owner()
+        if owner:
+            raise RuntimeError(f"GPU is already in use by external provider '{owner}'. Stop it before evaluation.")
         # Acquire before writing history. A rejected request must not leave a
         # permanently "running" result row behind.
         self._guard_and_acquire("eval", "pending")
@@ -272,6 +277,11 @@ class EvalManager:
 
     # ---- Playground generation ----------------------------------------
     async def start_generate(self, config: dict) -> str:
+        from app.serving.providers import external_gpu_owner
+
+        owner = await external_gpu_owner()
+        if owner:
+            raise RuntimeError(f"GPU is already in use by external provider '{owner}'. Stop it before loading a Playground model.")
         gen_id = uuid.uuid4().hex[:12]
         self._guard_and_acquire("gen", gen_id)
         from app.model_refs import resolve_model_ref

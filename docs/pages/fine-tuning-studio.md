@@ -30,6 +30,19 @@ In the right column, pick a priority — **Fastest iteration**, **Balanced**, or
 with reasoning (size, quality tier, context length, predicted VRAM, fit). Click
 **Use this model** to fill it in.
 
+### Compatibility before launch
+
+The model picker and validation use the shared capability registry. It records
+architecture, supported methods, quantization support, and the Transformers
+revision used for the check. Unknown causal-LM checkpoints are marked
+**experimental**; encoder-only and multimodal checkpoints are rejected for this
+causal fine-tuning workflow. Use **Inspect compatibility** in Model Registry for
+a detailed report on a custom or revision-pinned checkpoint.
+
+If Unsloth cannot load a supported checkpoint, the backend can fall back to the
+generic Transformers + PEFT path. QLoRA still requires the GPU image,
+bitsandbytes, and a compatible CUDA build.
+
 ## Dataset & hyperparameters
 
 - **Dataset:** pick an *instruction* dataset (must pass validation).
@@ -37,8 +50,24 @@ with reasoning (size, quality tier, context length, predicted VRAM, fit). Click
   - Epochs, Max steps (overrides epochs), Learning rate
   - Batch size (2), Gradient accumulation (4) → effective batch 8
   - Max sequence length (1024)
-- **Advanced** (expandable): LoRA rank/alpha/dropout, warmup ratio, LR scheduler,
-  optimizer (`adamw_8bit` default), save/log cadence.
+- **Advanced** (expandable): LoRA rank/alpha/dropout, tokenizer and loss policy,
+  warmup ratio, LR scheduler, optimizer (`adamw_8bit` default), save/log cadence.
+
+### Tokenizer and loss correctness
+
+Fine-tuning currently reuses the base model tokenizer so its vocabulary and
+embedding matrix stay aligned. Conversation rows require either that tokenizer's
+native chat template or an explicit custom Jinja template. There is no silent
+plain-role fallback.
+
+Choose **full sequence**, **completion only**, or **assistant turns only** loss.
+Completion-only requires the template's generation prompt to be an exact prefix
+of the complete training rendering. Assistant-only requires a template that can
+return assistant token masks. Invalid templates, masks erased by truncation,
+masked loss with packing, and TRL versions that would add special tokens twice
+are rejected with an actionable error before incorrect training can proceed.
+Use Dataset Manager → Data Lab → Tokenizer to preview the exact rendering and
+mask first.
 
 ## The fit panel — read it before launching
 

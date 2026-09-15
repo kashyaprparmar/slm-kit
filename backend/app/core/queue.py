@@ -68,6 +68,10 @@ class JobQueue:
     def current_id(self):
         return self._current_id
 
+    @property
+    def healthy(self) -> bool:
+        return self._worker is not None and not self._worker.done()
+
     def snapshot(self):
         return {"type": "queue", "current": self._current_id, "queued": list(self._pending),
                 "resource": gpu.snapshot()}
@@ -95,6 +99,13 @@ class JobQueue:
             lease = None
             try:
                 while run_id in self._pending:
+                    from app.serving.providers import external_gpu_owner
+
+                    owner = await external_gpu_owner()
+                    if owner:
+                        log.info("Training run %s waiting for external GPU provider %s", run_id, owner)
+                        await asyncio.sleep(1)
+                        continue
                     try:
                         lease = gpu.acquire("training", run_id)
                         break

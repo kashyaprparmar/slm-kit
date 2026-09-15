@@ -43,6 +43,7 @@ export function TrainingStudio({
   const [search] = useSearchParams();
   const [form, setForm] = useWorkflow<RunForm>(`training.${task}`, defaultForm({ task, output_name: defaultOutputName }));
   const [launchedRunId, setLaunchedRunId] = useWorkflow<number | null>(`training.${task}.run`, null, false);
+  const [activeProject] = useWorkflow<number | null>("active-project", null);
   const set = <K extends keyof RunForm>(k: K, v: RunForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   useEffect(() => {
@@ -50,15 +51,16 @@ export function TrainingStudio({
     if (requested) setForm((current) => current.base_model === requested ? current : { ...current, base_model: requested });
   }, [search, setForm]);
 
-  const payload = useMemo(() => toPayload(form), [form]);
+  const payload = useMemo(() => ({ ...toPayload(form), extra: activeProject ? { project_id: activeProject } : {} }), [form, activeProject]);
   const debounced = useDebouncedValue(JSON.stringify(payload), 450);
 
   const estimate = useQuery({
     queryKey: ["estimate", debounced],
     queryFn: () => api.estimate(JSON.parse(debounced)),
-    enabled: !!form.base_model.trim(),
+    enabled: !!form.base_model?.trim(),
   });
   const backends = useQuery({ queryKey: ["training-backends"], queryFn: api.backends, staleTime: 60_000 });
+  const selectedBackend = backends.data?.find((backend) => backend.name === form.backend);
 
   const launch = useMutation({
     mutationFn: () => api.createRun(payload),
@@ -75,7 +77,7 @@ export function TrainingStudio({
 
   const report: ValidationReport | undefined = estimate.data?.validation;
   const canLaunch =
-    !!form.base_model.trim() && form.dataset_id != null && (report?.ok ?? false) && !launch.isPending && debounced === JSON.stringify(payload) && !estimate.isFetching;
+    !!form.base_model?.trim() && form.dataset_id != null && (report?.ok ?? false) && !launch.isPending && debounced === JSON.stringify(payload) && !estimate.isFetching;
 
   return (
     <div className="space-y-6">
@@ -94,7 +96,13 @@ export function TrainingStudio({
         <div className="space-y-6">
           <Card>
             <CardHeader><CardTitle>Method</CardTitle></CardHeader>
-            <CardContent><MethodSelector value={form.method} onChange={(m) => set("method", m)} /></CardContent>
+            <CardContent>
+              <MethodSelector
+                value={form.method}
+                onChange={(m) => set("method", m)}
+                capabilities={selectedBackend?.method_capabilities}
+              />
+            </CardContent>
           </Card>
 
           <Card>
@@ -102,8 +110,17 @@ export function TrainingStudio({
             <CardContent className="space-y-4">
               <Field label="Training engine" hint="Unsloth is optimized for supported GPUs; Transformers is the broad compatibility fallback.">
                 <Select value={form.backend} onChange={(e) => set("backend", e.target.value)}>
-                  {(backends.data ?? [{ name: "unsloth" }, { name: "transformers" }]).filter((item) => item.name !== "scratch").map((item) => (
-                    <option key={item.name} value={item.name}>{item.name === "unsloth" ? "Unsloth — optimized" : "Transformers + PEFT — compatible"}</option>
+                  {(backends.data ?? []).filter((item) => item.name !== "scratch").map((item) => (
+                    <option
+                      key={item.name}
+                      value={item.name}
+                      disabled={
+                        !["supported", "experimental"].includes(item.availability.state)
+                        || !["supported", "experimental"].includes(item.task_capabilities[task]?.state ?? "unsupported")
+                      }
+                    >
+                      {item.display_name}
+                    </option>
                   ))}
                 </Select>
               </Field>
@@ -134,7 +151,8 @@ export function TrainingStudio({
                 <NumberField label="Context Length" hint="Maximum tokens used from each example." value={form.max_seq_length} step={128} min={128} onChange={(v) => set("max_seq_length", v ?? 1024)} />
               </div>
 
-              <Collapsible title="Advanced (LoRA, scheduler, optimizer, checkpointing)">
+              <Collapsible title="Advanced (LoRA, tokenizer, optimizer, checkpointing)">
+                <div className="space-y-5">
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
                   {form.method !== "full" && (
                     <>
@@ -159,6 +177,14 @@ export function TrainingStudio({
                   <NumberField label="Save every (steps)" value={form.save_steps} min={1} onChange={(v) => set("save_steps", v ?? 100)} />
                   <NumberField label="Log every (steps)" value={form.logging_steps} min={1} onChange={(v) => set("logging_steps", v ?? 5)} />
                 </div>
+                {task === "finetune" && <div className="space-y-3 border-t pt-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Tokenizer" hint="Reuse keeps model embeddings and tokenizer vocabulary aligned."><Select value={form.tokenizer_mode ?? "reuse"} onChange={e => set("tokenizer_mode", e.target.value as RunForm["tokenizer_mode"])}><option value="reuse">Reuse base tokenizer</option></Select></Field>
+                    <Field label="Loss policy" hint="Masked policies train only target tokens and require a compatible template."><Select value={form.loss_policy ?? "full_sequence"} onChange={e => set("loss_policy", e.target.value as RunForm["loss_policy"])}><option value="full_sequence">Full sequence</option><option value="completion_only">Completion only</option><option value="assistant_only">Assistant turns only</option></Select></Field>
+                  </div>
+                  <Field label="Custom chat template (optional)" hint="Jinja template used only when the model tokenizer has no native chat template."><textarea className="min-h-20 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs" value={form.chat_template ?? ""} onChange={e => set("chat_template", e.target.value)} /></Field>
+                </div>}
+                </div>
               </Collapsible>
             </CardContent>
           </Card>
@@ -177,6 +203,12 @@ export function TrainingStudio({
                 <>
                   <FitIndicator estimate={estimate.data.estimate} />
                   {report && <ValidationList report={report} />}
+                  <details className="rounded-md border p-3 text-xs">
+                    <summary className="cursor-pointer font-medium">Run plan</summary>
+                    <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2">
+                      {Object.entries(estimate.data.plan).filter(([, value]) => value != null && !Array.isArray(value)).map(([key, value]) => <div key={key}><dt className="text-muted-foreground">{key.replace(/_/g, " ")}</dt><dd className="break-words font-mono">{String(value)}</dd></div>)}
+                    </dl>
+                  </details>
                 </>
               ) : (
                 <p className="text-sm text-muted-foreground">Pick a base model to see the fit estimate.</p>

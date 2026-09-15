@@ -21,7 +21,105 @@ export interface HardwareProfile {
   cpu_util_pct?: number | null;
   disk_free_mb?: number | null;
   disk_total_mb?: number | null;
+  gpus: GPUDeviceProfile[];
+  gpu_count: number;
+  cuda_available: boolean;
+  cuda_runtime_version?: string | null;
+  nvidia_driver_version?: string | null;
+  mps_available: boolean;
+  platform?: string | null;
   source: string;
+}
+
+export interface GPUDeviceProfile {
+  id: number;
+  uuid?: string | null;
+  name: string;
+  vram_total_mb: number;
+  vram_free_mb: number;
+  utilization_pct?: number | null;
+  compute_capability?: string | null;
+  temperature_c?: number | null;
+  power_watts?: number | null;
+  bf16_supported: boolean;
+  fp16_supported: boolean;
+  fp8_supported: boolean;
+  flash_attention_feasible: boolean;
+}
+
+export type SupportState = "supported" | "experimental" | "unsupported" | "not_installed" | "missing_dependency" | "incompatible" | "requires_conversion";
+export type EvidenceLevel = "declared" | "installed" | "metadata" | "runtime";
+export interface Capability { state: SupportState; reason: string; requirements: string[]; evidence?: EvidenceLevel }
+export interface PeftMethodCapability { method: string; support: Capability; adapter_based: boolean; requires_quantized_base: boolean }
+export interface QuantizationCapability { format: string; operations: string[]; support: Capability }
+export interface TrainingBackendCapabilities {
+  schema_version: 1;
+  name: string;
+  display_name: string;
+  description: string;
+  availability: Capability;
+  tasks: string[];
+  methods: string[];
+  quantization: string[];
+  requirements: string[];
+  task_capabilities: Record<string, Capability>;
+  stages: Record<string, Capability>;
+  method_capabilities: Record<string, Capability>;
+  tokenizer: {
+    modes: Record<string, Capability>;
+    loss_policies: Record<string, Capability>;
+    templates: { native: Capability; explicit_override: Capability; fallback: Capability };
+  };
+  peft: Record<string, PeftMethodCapability>;
+  quantization_capabilities: Record<string, QuantizationCapability>;
+  platforms: string[];
+  architectures: string[];
+  required_dependencies: string[];
+  optional_dependencies: string[];
+}
+export interface ModelCapabilities {
+  family: string;
+  architecture_kind: string;
+  model_type?: string | null;
+  architectures: string[];
+  is_moe: boolean;
+  is_multimodal: boolean;
+  trust_remote_code: boolean;
+  chat_template: boolean;
+  training: Record<string, Capability>;
+  backends: Record<string, Capability>;
+  inference: Record<string, Capability>;
+  quantization: Record<string, Capability>;
+  export: Record<string, Capability>;
+  precision: Record<string, Capability>;
+  distributed: Record<string, Capability>;
+  template_capabilities?: {
+    native: Capability;
+    explicit_override: Capability;
+    fallback: Capability;
+  };
+  peft_methods?: Record<string, PeftMethodCapability>;
+  quantization_matrix?: Record<string, QuantizationCapability>;
+  dependencies?: Record<string, { installed: boolean; version?: string | null }>;
+  suggested_target_modules: string[];
+  warnings: string[];
+}
+
+export interface PreflightResult {
+  ok: boolean;
+  model_ref: string;
+  revision?: string | null;
+  kind?: string;
+  backend_verified?: string;
+  recommended_backend?: string;
+  architecture?: string;
+  context_length?: number | null;
+  vocab_size?: number | null;
+  parameter_count?: number | null;
+  has_chat_template?: boolean;
+  vram_peak_mb?: number;
+  warnings?: string[];
+  error?: string | null;
 }
 
 export interface MemoryEstimate {
@@ -66,6 +164,95 @@ export interface Dataset {
   is_sample: boolean;
   validation?: ValidationReport | null;
   created_at: string;
+}
+
+export interface DatasetVersion {
+  id: number;
+  dataset_id: number;
+  parent_version_id?: number | null;
+  fingerprint: string;
+  path: string;
+  fmt: string;
+  schema: Record<string, unknown>;
+  split: "source" | "train" | "validation" | "test" | string;
+  num_rows?: number | null;
+  num_tokens_est?: number | null;
+  size_bytes?: number | null;
+  created_at: string;
+}
+
+export interface DatasetRecipe {
+  id: number;
+  source_version_id: number;
+  name: string;
+  config: Record<string, unknown>;
+  fingerprint: string;
+  created_at: string;
+}
+
+export interface DatasetProfile {
+  id: number;
+  dataset_version_id: number;
+  tokenizer_artifact_id?: number | null;
+  kind: "tokenizer" | "quality" | string;
+  cache_key: string;
+  config: Record<string, unknown>;
+  stats: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TokenizerArtifact {
+  id: number;
+  model_ref: string;
+  revision?: string | null;
+  resolved_revision?: string | null;
+  fingerprint: string;
+  config: Record<string, unknown>;
+  status: string;
+  created_at: string;
+}
+
+export interface TokenizerProfileResult {
+  tokenizer: {
+    model_ref: string;
+    resolved_revision?: string | null;
+    fingerprint: string;
+    class: string;
+    vocab_size: number;
+    model_max_length?: number | null;
+    chat_template: boolean;
+  };
+  stats: {
+    sampled_rows: number;
+    total_tokens: number;
+    min: number;
+    max: number;
+    mean: number;
+    median: number;
+    p90: number;
+    p95: number;
+    p99: number;
+    truncation_percentage: number;
+    tokens_per_example: number;
+    tokens_per_character: number;
+    tokens_per_word: number;
+    unknown_token_rate: number;
+    padding_overhead_percentage: number;
+    packing_efficiency_percentage: number;
+    by_dominant_script: Record<string, Record<string, number>>;
+  };
+  previews: { line: number; rendered: string; tokens: string[]; input_ids: number[]; loss_mask: number[]; original_length: number; truncated: boolean }[];
+  errors: { line: number; message: string }[];
+}
+
+export interface QualityProfileResult {
+  sampled_rows: number;
+  valid_rows: number;
+  max_rows: number;
+  truncated_scan: boolean;
+  script_distribution: Record<string, number>;
+  warnings: { code: string; count: number; examples: { line: number; text: string; [key: string]: unknown }[] }[];
+  destructive_changes: false;
 }
 
 export interface Run {
@@ -166,6 +353,40 @@ export interface ModelInspection {
   supports_4bit?: boolean;
   suggested_target_modules?: string[];
   warnings?: string[];
+  capabilities?: ModelCapabilities;
+  resolved_commit?: string | null;
+  config_fingerprint?: string | null;
+  tokenizer_fingerprint?: string | null;
+  dependencies?: Record<string, { installed: boolean; version?: string | null }>;
+}
+
+export interface PreflightResult {
+  ok: boolean;
+  model_ref: string;
+  revision?: string | null;
+  kind?: string;
+  backend_verified?: string;
+  recommended_backend?: string;
+  architecture?: string;
+  context_length?: number | null;
+  vocab_size?: number | null;
+  parameter_count?: number | null;
+  has_chat_template?: boolean;
+  vram_peak_mb?: number;
+  warnings?: string[];
+  error?: string | null;
+  resolved?: Record<string, unknown>;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  description: string;
+  state: Record<string, unknown>;
+  run_count?: number;
+  runs?: Run[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ModelLineage {
@@ -251,4 +472,10 @@ export type TrainingEvent =
   | { type: "metric"; ts: number; step: number; total_steps?: number; metrics: Record<string, number> }
   | { type: "checkpoint"; ts: number; step: number; path: string; is_final: boolean }
   | { type: "sample"; ts: number; step: number; prompt: string; text: string }
-  | { type: "status"; ts: number; status: string; detail?: string };
+  | { type: "status"; ts: number; status: string; detail?: string }
+  | { type: "progress"; ts: number; current: number; total?: number; unit: string; message?: string }
+  | { type: "resource"; ts: number; resources: Record<string, number> }
+  | { type: "artifact"; ts: number; kind: string; path: string; metadata: Record<string, unknown> }
+  | { type: "warning"; ts: number; code: string; message: string; action?: string }
+  | { type: "profile"; ts: number; name: string; values: Record<string, unknown> }
+  | { type: "error"; ts: number; code: string; message: string; detail?: string; retryable: boolean };

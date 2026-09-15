@@ -2,6 +2,9 @@ import type {
   AdvisorRec,
   Checkpoint,
   Dataset,
+  DatasetProfile,
+  DatasetRecipe,
+  DatasetVersion,
   EvalResult,
   HardwareProfile,
   HFModel,
@@ -12,10 +15,16 @@ import type {
   ModelLineage,
   DeploymentStatus,
   ModelArtifact,
+  Project,
   Run,
   SystemStatus,
   UnpublishedRun,
   ValidationReport,
+  QualityProfileResult,
+  TokenizerArtifact,
+  TokenizerProfileResult,
+  PreflightResult,
+  TrainingBackendCapabilities,
 } from "./types";
 
 import { createLogger } from "./logger";
@@ -59,11 +68,19 @@ export class ApiError extends Error {
 }
 
 export const api = {
-  prepareDataset: (id: number, body: Record<string, unknown>) => req<{ datasets: Dataset[]; dropped_rows: number }>(`/api/datasets/${id}/prepare`, { method: "POST", body: JSON.stringify(body) }),
+  listProjects: () => req<Project[]>("/api/projects"),
+  createProject: (body: { name: string; description?: string; state?: Record<string, unknown> }) =>
+    req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
+  getProject: (id: number) => req<Project>(`/api/projects/${id}`),
+  updateProject: (id: number, body: Partial<Pick<Project, "name" | "description" | "state">>) =>
+    req<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteProject: (id: number) => req<{ deleted: number; runs_retained: boolean }>(`/api/projects/${id}`, { method: "DELETE" }),
+  prepareDataset: (id: number, body: Record<string, unknown>) => req<{ datasets: Dataset[]; dropped_rows: number; recipe_id: number; reused: boolean }>(`/api/datasets/${id}/prepare`, { method: "POST", body: JSON.stringify(body) }),
   trainingSettings: (config: Record<string, unknown>, preset: string) => req<{ config: Record<string, unknown>; reasons: Record<string, string>; warnings: string[] }>("/api/advisor/settings", { method: "POST", body: JSON.stringify({ config, preset }) }),
   diagnostics: () => req<{ checks: { name: string; status: string; detail: string; guidance: string }[] }>("/api/system/diagnostics"),
+  services: () => req<{ api: { status: string }; database: { status: string; engine: string; error?: string }; training_worker: { status: string; run_id?: number | null }; gpu_resource: { kind: string; id?: string | number }; providers: Record<string, { active?: boolean; running?: boolean; available?: boolean; guidance?: string; error?: string }> }>("/api/system/services"),
   activity: () => req<{ events: { id: string; ts: number; message: string; level: string; duration_ms?: number; correlation_id?: string }[] }>("/api/system/activity"),
-  servingProviders: () => req<{ transformers: DeploymentStatus; ollama: { installed: boolean; running: boolean; managed_model?: string; endpoint: string; guidance: string; models: { name: string }[]; loaded: { name: string }[] } }>("/api/serving/providers"),
+  servingProviders: () => req<{ transformers: DeploymentStatus; ollama: { installed: boolean; running: boolean; managed_model?: string; endpoint: string; guidance: string; models: { name: string }[]; loaded: { name: string }[] }; vllm: { available: boolean; active: boolean; managed: false; endpoint: string; guidance: string; models: { id: string }[]; error?: string } }>("/api/serving/providers"),
   startOllama: (model: string) => req<unknown>("/api/serving/ollama/start", { method: "POST", body: JSON.stringify({ model }) }),
   stopOllama: () => req<{ stopped: boolean }>("/api/serving/ollama/stop", { method: "POST" }),
   importOllama: (artifact_id: number, model: string) => req<{ model: string; status: string }>("/api/serving/ollama/import", { method: "POST", body: JSON.stringify({ artifact_id, model }) }),
@@ -110,15 +127,22 @@ export const api = {
     if (name) fd.append("name", name);
     return req<{ dataset: Dataset; validation: ValidationReport }>("/api/datasets/upload", { method: "POST", body: fd });
   },
+  datasetVersions: (id: number) => req<DatasetVersion[]>(`/api/datasets/${id}/versions`),
+  datasetRecipes: (id: number) => req<DatasetRecipe[]>(`/api/dataset-recipes?dataset_id=${id}`),
+  rerunDatasetRecipe: (id: number) => req<{ datasets: Dataset[]; dropped_rows: number; recipe_id: number; reused: boolean }>(`/api/dataset-recipes/${id}/rerun`, { method: "POST" }),
+  tokenizerProfile: (versionId: number, body: { model_ref: string; revision?: string; max_length: number; sample_limit: number; loss_policy: string; chat_template?: string }) =>
+    req<{ profile: DatasetProfile; tokenizer: TokenizerArtifact; result: TokenizerProfileResult; cached: boolean }>(`/api/dataset-versions/${versionId}/tokenizer-profile`, { method: "POST", body: JSON.stringify(body) }),
+  qualityProfile: (versionId: number, body: { max_rows: number; near_duplicate_threshold: number; compare_version_ids: number[] }) =>
+    req<{ profile: DatasetProfile; result: QualityProfileResult; cached: boolean }>(`/api/dataset-versions/${versionId}/quality-profile`, { method: "POST", body: JSON.stringify(body) }),
 
   // runs
   listRuns: () => req<Run[]>("/api/runs"),
   getRun: (id: number) =>
     req<{ run: Run; checkpoints: Checkpoint[]; queue_position: number | null }>(`/api/runs/${id}`),
   backends: () =>
-    req<{ name: string; tasks: string[]; methods: string[] }[]>("/api/runs/backends"),
+    req<TrainingBackendCapabilities[]>("/api/runs/backends"),
   estimate: (cfg: Record<string, unknown>) =>
-    req<{ estimate: MemoryEstimate; validation: ValidationReport; hardware: HardwareProfile }>(
+    req<{ estimate: MemoryEstimate; validation: ValidationReport; hardware: HardwareProfile; plan: Record<string, unknown> }>(
       "/api/runs/estimate",
       { method: "POST", body: JSON.stringify(cfg) },
     ),
@@ -156,6 +180,11 @@ export const api = {
     req<ModelInspection>("/api/registry/inspect", {
       method: "POST",
       body: JSON.stringify({ model_ref, revision: revision?.trim() || null }),
+    }),
+  preflightModel: (body: { model_ref: string; revision?: string | null; backend?: string | null; load_in_4bit?: boolean | null }) =>
+    req<PreflightResult>("/api/registry/preflight", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   deploymentStatus: () => req<DeploymentStatus>("/api/registry/deployment"),
   deployModel: (model_ref: string) =>

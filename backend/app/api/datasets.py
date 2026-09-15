@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
@@ -17,7 +17,16 @@ from app.config import get_settings
 from app.datasets import hf_import
 from app.datasets import samples as sample_mod
 from app.datasets import validate as dsvalidate
-from app.db.models import Dataset, EvalResult, Run
+from app.datasets.adapters import SchemaReport, inspect_rows
+from app.db.models import (
+    Dataset,
+    DatasetProfile,
+    DatasetRecipe,
+    DatasetSplit,
+    DatasetVersion,
+    EvalResult,
+    Run,
+)
 from app.db.session import engine
 from app.domain import DatasetKind
 
@@ -92,6 +101,11 @@ def import_from_hf(body: HFImportBody):
         db.add(row)
         db.commit()
         db.refresh(row)
+        from app.datasets.lineage import register_version
+
+        register_version(db, row, schema={"source": "huggingface", "repo_id": body.repo_id,
+                                          "config": body.config, "split": body.split})
+        db.commit()
     return {"dataset": row, "validation": report, "rows_imported": n_rows}
 
 
@@ -120,6 +134,23 @@ def preview(dataset_id: int):
         "validation": report,
         "stats": asdict(stats),
     }
+
+
+@router.get("/{dataset_id}/schema", response_model=SchemaReport)
+def inspect_schema(dataset_id: int, limit: int = Query(default=20, ge=1, le=100)):
+    with Session(engine) as db:
+        dataset = db.get(Dataset, dataset_id)
+        if not dataset:
+            raise HTTPException(404, "Dataset not found.")
+    path = Path(dataset.path)
+    try:
+        # JSON arrays use the existing eager parser; do not turn a preview into
+        # an unbounded allocation. JSONL/CSV/Parquet/TXT iterate lazily.
+        if dataset.fmt == "json" and path.stat().st_size > 16 * 1024 * 1024:
+            raise HTTPException(422, "Schema preview of JSON arrays is limited to 16 MB. Convert to JSONL for streaming inspection.")
+        return inspect_rows(dsvalidate._iter_records(path, dataset.fmt), limit)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, "Could not read dataset for schema inspection.") from exc
 
 
 @router.post("/upload")
@@ -173,6 +204,10 @@ async def upload(file: UploadFile, kind: str = Form(...), name: str | None = For
         db.add(row)
         db.commit()
         db.refresh(row)
+        from app.datasets.lineage import register_version
+
+        register_version(db, row, schema={"source": "upload", "original_filename": file.filename})
+        db.commit()
     return {"dataset": row, "validation": report}
 
 
@@ -188,6 +223,14 @@ def delete_dataset(dataset_id: int):
         evaluated = db.exec(select(EvalResult).where(EvalResult.dataset_id == dataset_id)).first()
         if used or evaluated:
             raise HTTPException(409, "This dataset belongs to recorded runs or evaluations. Keep it for reproducibility.")
+        versions = db.exec(select(DatasetVersion).where(DatasetVersion.dataset_id == dataset_id)).all()
+        version_ids = [version.id for version in versions]
+        if version_ids and db.exec(select(DatasetRecipe).where(DatasetRecipe.source_version_id.in_(version_ids))).first():
+            raise HTTPException(409, "This dataset is the source of a preparation recipe. Keep it for reproducibility.")
+        split_rows = db.exec(select(DatasetSplit)).all()
+        if any(version_id in {split.train_version_id, split.validation_version_id, split.test_version_id}
+               for split in split_rows for version_id in version_ids):
+            raise HTTPException(409, "This prepared dataset belongs to an immutable split. Keep it for reproducibility.")
         # Remove the uploaded/copied file, but never touch files outside our home.
         try:
             p = Path(row.path).resolve()
@@ -195,6 +238,11 @@ def delete_dataset(dataset_id: int):
                 p.unlink(missing_ok=True)
         except OSError as exc:
             raise HTTPException(500, "Could not remove the dataset file.") from exc
+        for version in versions:
+            for profile in db.exec(select(DatasetProfile).where(DatasetProfile.dataset_version_id == version.id)).all():
+                db.delete(profile)
+            db.delete(version)
+        db.flush()
         db.delete(row)
         db.commit()
     return {"deleted": dataset_id}
@@ -203,37 +251,104 @@ def delete_dataset(dataset_id: int):
 class PrepareBody(BaseModel):
     columns: dict[str, str] = Field(default_factory=dict)
     test_fraction: float = Field(default=.1, ge=0, le=.5)
+    validation_fraction: float = Field(default=0.0, ge=0, le=.5)
     shuffle: bool = True
     deduplicate: bool = True
     drop_invalid: bool = False
     seed: int = Field(default=42, ge=0)
 
+    @property
+    def fractions(self) -> dict[str, float]:
+        return {
+            "train": round(1 - self.validation_fraction - self.test_fraction, 10),
+            "validation": self.validation_fraction,
+            "test": self.test_fraction,
+        }
+
 
 @router.post("/{dataset_id}/prepare", status_code=201)
-def prepare_dataset(dataset_id: int, body: PrepareBody):
+async def prepare_dataset(dataset_id: int, body: PrepareBody):
+    from app.core.cpu_jobs import cpu_jobs
+    from app.datasets.lineage import current_version, json_fingerprint, register_version
     from app.datasets.prepare import prepare
+
+    if body.validation_fraction + body.test_fraction > .8:
+        raise HTTPException(422, "Validation and test fractions must leave at least 20% for training.")
     with Session(engine) as db:
         source = db.get(Dataset, dataset_id)
         if not source:
             raise HTTPException(404, "Dataset not found.")
-        if set(body.columns) - {"prompt", "response", "text", "messages"}:
-            raise HTTPException(422, "Map prompt, response, text or messages columns.")
-        destination = _settings.datasets_dir / "prepared"
-        destination.mkdir(parents=True, exist_ok=True)
-        try:
-            prepared, dropped = prepare(source.path, destination, DatasetKind(source.kind), body.columns,
-                                         body.test_fraction, body.shuffle, body.deduplicate, body.drop_invalid, body.seed)
-        except (ValueError, OSError) as exc:
-            raise HTTPException(422, str(exc)) from exc
-        records = []
-        for split, path, kind, report, stats in prepared:
-            row = Dataset(name=f"{source.name} ({split})", kind=kind.value, path=str(path), fmt=stats.fmt,
-                          num_rows=stats.num_rows, num_tokens_est=stats.num_tokens_est,
-                          size_bytes=stats.size_bytes, validation={**report.model_dump(), "preparation": body.model_dump(),
-                          "source_dataset_id": source.id, "fingerprint": stats.fingerprint})
-            db.add(row)
-            records.append(row)
+        if set(body.columns) - {"instruction", "input", "output", "prompt", "response",
+                                "question", "answer", "completion", "text", "messages"}:
+            raise HTTPException(422, "Map only canonical text, conversation, or prompt/answer fields.")
+        source_version = current_version(db, source)
         db.commit()
-        for row in records:
-            db.refresh(row)
-    return {"datasets": records, "dropped_rows": dropped}
+        source_version_id = source_version.id
+        source_id, source_name = source.id, source.name
+        source_path, source_kind = source.path, DatasetKind(source.kind)
+        recipe_config = body.model_dump()
+        recipe_fingerprint = json_fingerprint({"source": source_version.fingerprint, "recipe": recipe_config})
+        existing = db.exec(select(DatasetRecipe).where(DatasetRecipe.fingerprint == recipe_fingerprint)).first()
+        if existing:
+            split = db.exec(select(DatasetSplit).where(DatasetSplit.recipe_id == existing.id)).first()
+            if split:
+                version_ids = [value for value in (split.train_version_id, split.validation_version_id, split.test_version_id) if value]
+                versions = [db.get(DatasetVersion, value) for value in version_ids]
+                records = [db.get(Dataset, version.dataset_id) for version in versions if version]
+                if len(records) != len(version_ids) or any(not Path(row.path).is_file() for row in records if row):
+                    raise HTTPException(409, "A cached recipe output is unavailable. Restore the application data volume before replaying it.")
+                return {"datasets": [row for row in records if row], "dropped_rows": 0,
+                        "recipe_id": existing.id, "reused": True}
+
+    destination = _settings.datasets_dir / "prepared"
+    try:
+        prepared, dropped = await cpu_jobs.run(
+            prepare, source_path, destination, source_kind, body.columns,
+            body.test_fraction, body.shuffle, body.deduplicate, body.drop_invalid,
+            body.seed, body.validation_fraction,
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    paths = [path for _, path, *_ in prepared]
+    try:
+        with Session(engine) as db:
+            source_version = db.get(DatasetVersion, source_version_id)
+            if not source_version:
+                raise HTTPException(409, "The source dataset version was removed during preparation.")
+            recipe = DatasetRecipe(source_version_id=source_version_id, name=f"Prepare dataset {dataset_id}",
+                                   config=recipe_config, fingerprint=recipe_fingerprint)
+            db.add(recipe)
+            db.flush()
+            records, versions = [], {}
+            for split_name, path, kind, report, stats in prepared:
+                row = Dataset(name=f"{source_name} ({split_name})", kind=kind.value, path=str(path), fmt=stats.fmt,
+                              num_rows=stats.num_rows, num_tokens_est=stats.num_tokens_est,
+                              size_bytes=stats.size_bytes, validation={**report.model_dump(), "preparation": recipe_config,
+                              "source_dataset_id": source_id, "fingerprint": stats.fingerprint})
+                db.add(row)
+                db.flush()
+                version = register_version(db, row, parent_version_id=source_version_id, split=split_name,
+                                           schema={"canonical_schema_version": 1})
+                records.append(row)
+                versions[split_name] = version
+            split = DatasetSplit(
+                recipe_id=recipe.id,
+                train_version_id=versions["train"].id,
+                validation_version_id=versions.get("validation").id if versions.get("validation") else None,
+                test_version_id=versions.get("test").id if versions.get("test") else None,
+                seed=body.seed,
+                fractions=body.fractions,
+                fingerprint=json_fingerprint({"recipe": recipe_fingerprint,
+                                              "outputs": {key: value.fingerprint for key, value in versions.items()}}),
+            )
+            db.add(split)
+            db.commit()
+            for row in records:
+                db.refresh(row)
+            recipe_id = recipe.id
+        return {"datasets": records, "dropped_rows": dropped, "recipe_id": recipe_id, "reused": False}
+    except Exception:
+        for path in paths:
+            path.unlink(missing_ok=True)
+        raise

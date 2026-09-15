@@ -24,6 +24,12 @@ Quick, hands-on testing.
 
 First use of a model loads it (a few seconds to a minute depending on size).
 
+The shared loader accepts `run:<id>` references, full checkpoints, PEFT
+adapters, scratch-pretrained outputs, Hugging Face revisions, and local paths.
+Unsupported architectures are rejected before generation with an actionable
+diagnostic. Evaluation logs and scorecards are persisted so they can be
+reopened after a restart.
+
 ---
 
 ## Evaluate (the eval harness)
@@ -82,3 +88,5 @@ Use several together; no single number tells the whole story.
   other metrics still compute.
 - Without a judge API key, the LLM-as-judge option is disabled and everything
   else works normally.
+- If vLLM or Ollama owns the GPU, the lab reports the provider and waits rather
+  than competing for memory; stop the external provider or use its endpoint.

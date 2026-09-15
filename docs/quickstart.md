@@ -39,6 +39,10 @@ docker compose up --build -d
 # docker compose -f docker-compose.cpu.yml up --build -d
 ```
 
+The default compose file passes `gpus: all` to the backend and includes the
+training/evaluation dependencies. Use the CPU file only when NVIDIA passthrough
+is unavailable.
+
 Wait until both containers are healthy, then open **http://localhost:5173**.
 
 ```powershell
@@ -119,7 +123,7 @@ docker compose -f docker-compose.dev.yml up --build
 - [Docker](docker.md) — GPU vs CPU vs dev compose, volumes, env
 - [Requirements](requirements.md) — hardware / software
 - [Configuration](configuration.md) — HF token, judge API key, llmfit, llama.cpp
-- [Page guides](README.md#page-by-page-guides-the-8-screens-of-the-app)
+- [Page guides](README.md#page-by-page-guides-the-11-screens-of-the-app)
 
 ---
 

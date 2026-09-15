@@ -33,6 +33,11 @@ runs:
 - **Full configuration (config-as-data):** the exact JSON that defined the run.
   Copy it, or:
 
+Each run directory also contains a portable `run.json` manifest with normalized
+configuration, model/dataset references, timestamps, and artifact paths. Failed
+runs write `failure.json` plus a readable `failure.md`; use the API logs endpoint
+(`/api/runs/{id}/logs`) when collecting diagnostics for support.
+
 ### Two actions
 
 - **Re-run** — re-queues a brand-new run from this run's stored config. Exact,

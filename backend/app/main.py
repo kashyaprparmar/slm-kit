@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import advisor, datasets, registry, runs, serving, system
+from app.api import advisor, data_lab, datasets, projects, registry, runs, serving, system
 from app.api import eval as eval_api
 from app.config import get_settings
 from app.core.errors import install_errors
@@ -90,6 +90,8 @@ app.add_middleware(
 
 app.include_router(system.router)
 app.include_router(datasets.router)
+app.include_router(data_lab.router)
+app.include_router(projects.router)
 app.include_router(runs.router)
 app.include_router(registry.router)
 app.include_router(advisor.router)
