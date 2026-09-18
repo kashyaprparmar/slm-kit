@@ -31,6 +31,13 @@ export const METHODS: MethodMeta[] = [
     advanced: true,
   },
   {
+    value: "freeze",
+    label: "Freeze tuning",
+    blurb: "Train selected layers or modules while freezing the rest.",
+    vramNote: "Trainable footprint depends on the selected layers.",
+    advanced: true,
+  },
+  {
     value: "full",
     label: "Full fine-tune",
     blurb: "Every weight is trained.",

@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Field, NumberField, Collapsible } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DatasetPicker } from "@/components/studio/DatasetPicker";
@@ -132,6 +133,19 @@ export default function Pretrain() {
             <CardHeader><CardTitle>Corpus & training</CardTitle></CardHeader>
             <CardContent className="space-y-4">
               <DatasetPicker value={form.dataset_id} onChange={(id) => set("dataset_id", id)} kinds={["pretrain_corpus", "domain_corpus"]} />
+              <div className="grid grid-cols-2 gap-4">
+                <Field label="Tokenizer" hint="Train a byte-level BPE tokenizer or import vocab.json and merges.txt from a local directory.">
+                  <Select value={form.tokenizer_mode} onChange={(e) => set("tokenizer_mode", e.target.value as PretrainForm["tokenizer_mode"])}>
+                    <option value="train">Train from corpus</option>
+                    <option value="import">Import local tokenizer</option>
+                  </Select>
+                </Field>
+                {form.tokenizer_mode === "import" && (
+                  <Field label="Tokenizer directory">
+                    <Input value={form.tokenizer_source} onChange={(e) => set("tokenizer_source", e.target.value)} placeholder="C:\\models\\tokenizer" />
+                  </Field>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
                 <NumberField label="Max steps" value={form.max_steps} min={1} step={100} onChange={(v) => set("max_steps", v ?? 1000)} />
                 <NumberField label="Batch size" value={form.per_device_batch_size} min={1} onChange={(v) => set("per_device_batch_size", v ?? 8)} />

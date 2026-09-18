@@ -34,3 +34,13 @@ workloads are not started together.
 
 See [Local deployment](../deployment.md) for endpoint examples and
 [Docker](../docker.md#dedicated-vllm-service-optional) for vLLM startup.
+
+## Optional managed engines and normalized APIs
+
+SGLang is optional. Configure an external OpenAI service with `SLMKIT_SGLANG_URL` (default localhost:8803), or install SGLang separately in a compatible Linux/CUDA environment for managed startup. An absent package reports **Not installed · optional**. See the [official SGLang launch reference](https://docs.sglang.ai/backend/pd_disaggregation.html) for supported launch conventions.
+
+Installed vLLM/SGLang may be started through Serve Model. Advanced controls are shown only for flags advertised by the installed CLI; request validation also checks detected CUDA/GPU count and local model context/quantization metadata. External services keep their own lifecycle. SLM Kit stops only workers it owns. LoRA/quantization profiles, tool/reasoning parsers and speculative draft compatibility remain gated until verified; see the [official vLLM argument reference](https://docs.vllm.ai/en/v0.8.5/serving/engine_args.html) for the upstream controls.
+
+The main backend provides GET `/v1/models`, POST `/v1/chat/completions`, POST `/v1/completions` and POST `/v1/scores`. Discovery returns `provider::model` IDs; use those IDs with the main backend URL. Native text completion uses raw text and supports streaming. Native reward deployment provides scalar scores and rejects generation; choose a registered reward artifact in Reward model scoring, start it, then score text. Scores are model-specific. Unconfigured tools/reasoning are explicitly rejected by the gateway.
+
+POST `/api/serving/{provider}/start` accepts model and optional validated engine options; POST `/api/serving/{provider}/stop` stops a managed worker. GET `/api/serving/{provider}/options` reports installed CLI controls. Real optional CUDA provider compatibility remains unverified by the CPU-only fixture suite.

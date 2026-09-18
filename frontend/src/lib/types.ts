@@ -1,13 +1,15 @@
 // Mirrors the backend Pydantic models (app/domain.py, app/db/models.py).
 
-export type TaskType = "pretrain" | "continued_pretrain" | "finetune";
-export type Method = "lora" | "qlora" | "dora" | "full" | "prompt_tuning";
+export type TaskType = "pretrain" | "continued_pretrain" | "finetune" | "alignment";
+export type Method = "freeze" | "lora" | "qlora" | "dora" | "full" | "prompt_tuning";
 export type RunStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 export type DatasetKind =
   | "pretrain_corpus"
   | "domain_corpus"
   | "instruction"
-  | "eval";
+  | "eval"
+  | "preference"
+  | "kto";
 export type FitLevel = "fits" | "tight" | "wont_fit";
 
 export interface HardwareProfile {
@@ -50,8 +52,19 @@ export interface GPUDeviceProfile {
 export type SupportState = "supported" | "experimental" | "unsupported" | "not_installed" | "missing_dependency" | "incompatible" | "requires_conversion";
 export type EvidenceLevel = "declared" | "installed" | "metadata" | "runtime";
 export interface Capability { state: SupportState; reason: string; requirements: string[]; evidence?: EvidenceLevel }
-export interface PeftMethodCapability { method: string; support: Capability; adapter_based: boolean; requires_quantized_base: boolean }
-export interface QuantizationCapability { format: string; operations: string[]; support: Capability }
+export interface PeftMethodCapability { method: string; support: Capability; adapter_based: boolean; requires_quantized_base: boolean; features?: Record<string, Capability> }
+export interface QuantizationCapability { format: string; operations: string[]; support: Capability; compute_dtypes?: string[]; storage_dtypes?: string[]; double_quantization?: boolean }
+export interface OptimizationCapability {
+  id: string;
+  label: string;
+  category: "peft" | "optimizer" | "acceleration";
+  disclosure: "recommended" | "advanced" | "expert";
+  support: Capability;
+  installed_version?: string | null;
+  compatibility?: Record<string, unknown>;
+  configuration_schema?: Record<string, unknown>;
+  impact?: Record<string, unknown>;
+}
 export interface TrainingBackendCapabilities {
   schema_version: 1;
   name: string;
@@ -72,6 +85,12 @@ export interface TrainingBackendCapabilities {
   };
   peft: Record<string, PeftMethodCapability>;
   quantization_capabilities: Record<string, QuantizationCapability>;
+  precision?: Record<string, Capability>;
+  attention?: Record<string, Capability>;
+  gradient_checkpointing?: Record<string, Capability>;
+  rope?: Record<string, Capability>;
+  optimizations?: Record<string, OptimizationCapability>;
+  optional_features?: Record<string, Capability>;
   platforms: string[];
   architectures: string[];
   required_dependencies: string[];
@@ -125,6 +144,7 @@ export interface PreflightResult {
 export interface MemoryEstimate {
   weights_mb: number;
   optimizer_mb: number;
+  reference_model_mb?: number;
   gradients_mb?: number;
   adapters_mb?: number;
   safe_budget_mb?: number;
@@ -140,6 +160,10 @@ export interface MemoryEstimate {
   fit: FitLevel;
   source: string;
   notes: string[];
+  total_parameters?: number | null;
+  trainable_parameters?: number | null;
+  frozen_parameters?: number | null;
+  trainable_percentage?: number | null;
 }
 
 export interface ValidationIssue {
@@ -297,6 +321,7 @@ export interface SystemStatus {
 }
 
 export interface ModelArtifact {
+  export_capabilities?: Record<string, Capability>;
   id: number;
   name: string;
   kind: string;
@@ -308,6 +333,8 @@ export interface ModelArtifact {
   status: string; // ready | quantizing | failed
   error?: string | null;
   meta?: Record<string, unknown> | null;
+  model_category?: "causal_lm" | "adapter" | "merged_model" | "reward_model" | "reference_model" | "quantized_model";
+  evaluation_capabilities?: string[];
   created_at: string;
 }
 
@@ -331,6 +358,8 @@ export interface ModelOption {
   run_id?: number | null;
   local_path?: string | null;
   deployable: boolean;
+  model_category: "causal_lm" | "adapter" | "merged_model" | "reward_model" | "reference_model" | "quantized_model";
+  evaluation_capabilities: string[];
   source: "run" | "artifact";
   task?: string;
   method?: string;

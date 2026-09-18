@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from sqlmodel import Session, select
 
+from app.api import data_lab
 from app.api import datasets as datasets_api
 from app.datasets.lineage import backfill_legacy_versions, current_version, register_version
 from app.datasets.prepare import prepare
@@ -137,6 +138,15 @@ def test_loss_masks_and_template_requirements():
         render_and_tokenize(row, tokenizer, max_length=1000)
     with pytest.raises(TokenizerDataError, match="removed every target"):
         render_and_tokenize(row, FakeTokenizer(), max_length=2, loss_policy="completion_only")
+
+
+@pytest.mark.parametrize("revision", [None, "", "main", "v1.2", "refs/pr/7", "a" * 39, "g" * 40])
+def test_mutable_tokenizer_revisions_never_take_the_pre_resolution_cache_path(revision):
+    assert data_lab._is_immutable_hf_revision(revision) is False
+
+
+def test_full_hf_commit_revision_can_take_the_pre_resolution_cache_path():
+    assert data_lab._is_immutable_hf_revision("0123456789abcdefABCDEF0123456789abcdefAB") is True
 
 
 def test_quality_profile_reports_examples_without_mutation(tmp_path):

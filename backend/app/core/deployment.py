@@ -71,6 +71,8 @@ class DeploymentManager:
             spec = resolve_model_ref(model_ref)
         except ModelReferenceError:
             raise
+        if spec.model_category == "reference_model":
+            raise ValueError("Reference artifacts are evaluation inputs and cannot be deployed.")
         async with self._lock:
             if self.active and self._model_ref == spec.requested_ref:
                 return self.status()
@@ -80,7 +82,7 @@ class DeploymentManager:
             workdir.mkdir(parents=True, exist_ok=True)
             config_path = workdir / "config.json"
             config_path.write_text(
-                json.dumps({"model_ref": spec.requested_ref, "model_id": spec.label}, indent=2),
+                json.dumps({"model_ref": spec.requested_ref, "model_id": spec.requested_ref}, indent=2),
                 encoding="utf-8",
             )
             self._logs = [f"Starting {spec.kind} deployment for {spec.requested_ref}"]
@@ -106,7 +108,7 @@ class DeploymentManager:
 
         try:
             await self._wait_healthy()
-        except Exception:
+        except BaseException:
             async with self._lock:
                 await self._stop_locked()
             raise
@@ -158,15 +160,9 @@ class DeploymentManager:
         proc, self._proc = self._proc, None
         if proc is not None and proc.returncode is None:
             log.info("stopping deployment pid=%s", proc.pid)
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except (TimeoutError, ProcessLookupError):
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
+            from app.core.runner import _terminate_process_tree
+            await asyncio.to_thread(_terminate_process_tree, proc.pid)
+            await proc.wait()
         if self._drain_task is not None:
             if not self._drain_task.done():
                 self._drain_task.cancel()

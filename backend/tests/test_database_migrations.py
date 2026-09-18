@@ -24,7 +24,7 @@ def test_fresh_database_migrations_and_foreign_keys(database):
     first = upgrade_database(database)
     assert first["backup"] is None
     report = database_diagnostics(database)
-    assert report["revision"] == report["expected_revision"] == "0003_dataset_versions"
+    assert report["revision"] == report["expected_revision"] == "0004_serving_benchmarks"
     assert report["journal_mode"] == "wal"
     assert report["foreign_keys"] is True
     assert report["integrity"] == ["ok"]
@@ -68,7 +68,7 @@ def test_legacy_data_is_adopted_and_backup_contains_rows(database):
         assert db.get(Dataset, dataset_id).path == "user/data.jsonl"
     # Closing/reopening a database must preserve its schema revision and rows.
     database.dispose()
-    assert upgrade_database(database)["previous_revision"] == "0003_dataset_versions"
+    assert upgrade_database(database)["previous_revision"] == "0004_serving_benchmarks"
 
 
 def test_incompatible_legacy_schema_is_not_partially_migrated(database):

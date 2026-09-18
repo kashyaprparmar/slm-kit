@@ -14,7 +14,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Backend REST + WebSocket, so the app is same-origin in dev.
-      "/api": { target: apiTarget, changeOrigin: true },
+        "/api": { target: apiTarget, changeOrigin: true },
+        "/v1": { target: apiTarget, changeOrigin: true },
       "/ws": { target: wsTarget, ws: true },
     },
   },

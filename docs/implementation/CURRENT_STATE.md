@@ -1,6 +1,6 @@
 # Current state of SLM Kit
 
-Audit date: 2026-09-15. Foundation review updated: 2026-09-15. Reference commit: `5d64b78b6dc5289ef419d22ab11cd629cdba6337`. **Source of truth: the actual working tree, including substantial pre-existing modified and untracked source.** Phase A feature work has not started; the shared contracts requested by the architecture review are now implemented.
+Audit date: 2026-09-15. Implementation state updated: 2026-09-16. Reference commit: `5d64b78b6dc5289ef419d22ab11cd629cdba6337`. **Source of truth: the actual working tree, including substantial pre-existing modified and untracked source.** Phase A and Phase B remain partially complete. The shared Phase C preference architecture is partially complete; installed-runtime objective evidence remains open.
 
 ## Scope and evidence
 
@@ -32,7 +32,7 @@ Keep these routes backward compatible; extend response schemas instead of invent
 
 ## TrainingBackend and actual engine integration
 
-`backends/base.py` defines TrainingBackend with validate_config, estimate_footprint, export_config, an event-yielding run method, and `TrainingBackendCapabilities`. The descriptor is now the source for supported task/method properties and the additive `/api/runs/backends` capability response. `RegisteredBackendSelector` resolves an explicit registry key; automatic fallback/selection remains B04 work. RunContext carries directories, resume path and STOP sentinel. Built-ins are scratch and two named profiles of the same current causal worker: Unsloth and native Transformers.
+`backends/base.py` defines TrainingBackend with validate_config, estimate_footprint, export_config, an event-yielding run method, and `TrainingBackendCapabilities`. The descriptor is the source for supported task/method properties and the additive `/api/runs/backends` capability response. `AutoBackendSelector` evaluates operation, model metadata, hardware, dependencies, objective, tokenizer policy, and runtime choices before enqueue; selected/rejected reasons are persisted and shown in the run plan. Explicit backend selection remains strict. RunContext carries directories, resume path and STOP sentinel. Built-ins are scratch, native Transformers, Unsloth, and optional LLaMA-Factory.
 
 Native Transformers/TRL/PEFT currently supports causal SFT and continued pretraining using SFTTrainer, AutoModelForCausalLM, PEFT LoRA/QLoRA/DoRA or full tuning. SFTConfig/Trainer keyword changes are handled through signature inspection. Heavy imports stay inside workers. Native selection skips Unsloth import; however the baseline test named native independence checks metadata/validation/export, not an actual training step with Unsloth absent.
 
@@ -44,13 +44,15 @@ Continued pretraining uses canonical raw content plus EOS and bypasses chat form
 
 Scratch is a custom torch GPT with trained byte-level BPE, block sampling, AdamW, loss/samples/checkpoints. It reads/tokenizes the corpus into memory. Checkpoints contain weights/architecture/tokenizer; optimizer/RNG/data cursor are absent and resume_from is ignored. The worker entrypoint can discover numbered checkpoints, but this does not make scratch resumable. Do not replace scratch; extend its checkpoint contract.
 
-No LLaMA-Factory backend, alignment engine or distributed launcher is registered. Generated Unsloth DPO/PPO/etc. files are not product integration.
+`LlamaFactoryBackend` dynamically reports absent, incompatible, experimental, or supported installation state. It translates validated config and canonical data at its boundary, runs the CLI inside the normal subprocess/event/GPU-lease lifecycle, and adds no mandatory dependency. Its installed-runtime path was unavailable for end-to-end verification. A shared native `PreferenceTrainer` implements DPO/IPO/ORPO/SimPO strategies and KTO label semantics; PPO and distributed launching remain unimplemented.
 
 ## Data Lab, dataset identity and normalization
 
-`datasets/adapters.py` is the authoritative import-light canonical boundary. `DatasetAdapter`, `DatasetAdapterCapabilities`, and the built-in registry now sit behind the existing `detect_schema` and `canonicalize` facade. Adapters expose detect, validate, canonicalize, preview, and stage-compatibility contracts. Existing raw text, pair, OpenAI messages, ShareGPT, ambiguity checks, and safety gates behave as before. Preference/tool/pretokenized markers remain deliberately gated. Do not flatten them to SFT.
+`datasets/adapters.py` is the authoritative import-light canonical boundary. `DatasetAdapter`, `DatasetAdapterCapabilities`, and `DatasetAdapterRegistry` sit behind the existing `detect_schema` and `canonicalize` facade. Adapters expose detect, structured validation, canonicalize, preview, semantic fingerprint, and stage-compatibility contracts. Existing raw text, pair, OpenAI messages, ShareGPT, ambiguity checks, and safety gates retain their behavior and historical v1 storage rows (`text` or `messages`).
 
-Verified defect: instruction conversion drops top-level system/history. KTO has no detection; an otherwise valid prompt/response can lose desirable metadata. Tools/media require a new version of canonical records, not extra raw-column parsing inside trainers.
+Alpaca instruction conversion now preserves an optional system message and ordered history pairs before the current instruction/input and answer. It rejects malformed history or system/history metadata on formats that cannot represent it, so canonicalization cannot silently drop those fields.
+
+Version-2 canonical contracts define preference branches, KTO desirability, structured tool calls, and media references. Preference and KTO adapters now canonicalize and validate alignment rows, including KTO label balance; they remain unavailable to SFT. Tool, pretokenized, and multimodal markers stay recognized and worker-gated. Existing prepared datasets, recipes, and DatasetVersion schema v1 remain unchanged.
 
 `validate.py` owns file iteration/validation/heuristic token estimates; JSON arrays have different memory characteristics from streamed JSONL/CSV/text/Parquet. HF import supports bounded streaming. `prepare.py` uses a SQLite disk spool, deterministic sorting, canonical deduplication, seeded train/validation/test fractions, staged files and atomic publication with cleanup. API persists recipe/version/split metadata. Existing mappings are useful but UI exposes only prompt/answer.
 
@@ -74,7 +76,7 @@ Inference `model_runtime._encode` has independent template fallback and may toke
 
 `model_refs.py` is the shared lazy resolver for HF/local/run references, scratch and adapters. `integrations/hf_hub.py` reads config/tokenizer/model metadata and caches capabilities by revision. `models/capabilities.py` classifies architecture from metadata, including unknown causal, MoE, encoder/seq2seq and multimodal; repository labels no longer establish architecture. Family metadata now implements `ModelFamilyAdapter`, and inspection adds structured template, PEFT-method, and operation-specific quantization contracts while retaining all legacy maps. Preserve conservative unknown/unsupported classification.
 
-Backend listings and frontend method/backend availability now consume the backend descriptor returned by the API. `app/capabilities.py` centralizes support/evidence models and import-free optional dependency inspection; system diagnostics reuse the same dependency registry. Full operation + model + runtime + hardware resolution is still B02/B04 work, so declared or installed evidence must not be described as runtime verification.
+Backend listings and frontend method/backend availability consume the backend descriptor returned by the API. `app/capabilities.py` centralizes support/evidence models and import-free optional dependency inspection; system diagnostics reuse the same registry. Pre-launch operation + model + runtime + hardware selection is implemented, but B02 isolated loader/forward/backward evidence remains open, so declared or installed evidence must not be described as runtime verification.
 
 Preflight coordinator provides timeout/cancellation and GPU lease isolation. The worker loads AutoConfig/AutoTokenizer only; CUDA availability sets unsloth_supported=True. It does not import/instantiate Unsloth or AutoModel and does not measure model trainability. Scratch preflight similarly checks artifacts/metadata. Rename evidence levels before claiming backend verification. Admission currently does not call the external-provider owner check used elsewhere.
 
@@ -86,15 +88,15 @@ The FIFO queue recovers queued runs and marks interrupted running/eval/export st
 
 `runner.py` launches python worker with merged stdout/stderr, JSON events and a STOP -> terminate -> kill cancellation escalation. It writes logs/metrics/checkpoints/status/manifests/failure reports and releases resources through the queue. The training loop runs in a thread to bridge synchronous Trainer callbacks into events. Future nested engine/distributed children need process-tree termination and bounded queues.
 
-Training event union retains log, metric, checkpoint, sample, and status and now accepts additive progress, resource, artifact, warning, profile, and error envelopes. The parser remains tolerant of unknown/stray lines. Existing backends do not emit the new envelopes yet; callback mapping, persistence, batching, and monitor presentation remain later telemetry work. Metric history is JSONL; each metric also updates Run.metrics and commits, so high-frequency expansion needs batching.
+Training event union retains log, metric, checkpoint, sample, and status and accepts additive progress, resource, artifact, warning, profile, and error envelopes. Backends now emit profile and artifact evidence; the runner idempotently registers final model/adapter artifacts and preserves reference lineage. The parser remains tolerant of unknown/stray lines. Metric history is JSONL; each metric also updates Run.metrics and commits, so high-frequency expansion still needs batching.
 
 CPU jobs use a bounded semaphore. Tokenizer profiling has a timeout, but task-cancellation cleanup needs proof; GGUF conversion uses synchronous subprocess streaming without a comparable explicit job timeout/cancel contract. Do not infer all workers are equally bounded.
 
 ## Evaluation, registry, lineage and exports
 
-Evaluation manager isolates GPU jobs, persists EvalResult and uses shared ModelRuntime for generation/evaluation/deployment. Multiple models run sequentially; metrics include exact match/token F1 and optional ROUGE/BLEU, reference perplexity, latency/throughput and optional judge. This is a useful base-vs-trained comparison foundation, not a benchmark/regression suite. Fix structured conversation parity before trusting comparisons. Equal-example aggregation of perplexities should be documented distinctly from corpus token-weighted perplexity.
+Evaluation manager isolates GPU jobs and persists EvalResult. Generative models use shared ModelRuntime for generation/evaluation/deployment; registered reward artifacts use a separate scalar sequence-classification runtime and preference datasets to report chosen/rejected score, reward margin, and pairwise accuracy. Multiple models run sequentially. Generative metrics include exact match/token F1 and optional ROUGE/BLEU, reference perplexity, latency/throughput and optional judge. This is a useful comparison foundation, not a benchmark/regression suite. Fix structured conversation parity before trusting generative comparisons. Equal-example aggregation of perplexities should be documented distinctly from corpus token-weighted perplexity.
 
-Registry can browse completed runs via stable run references, import/publish HF models, generate a model card, merge adapters and convert/quantize GGUF. Final trainer checkpoint registration does **not** automatically create a ModelArtifact. Card generation is tied to publish, not run completion. ModelArtifact stores run/base/source metadata but no explicit parent artifact FK or typed reward/reference distinctions. Existing string kind values include merged beyond ArtifactKind enum: preserve old data when tightening types.
+Registry can browse completed runs via stable run references, import/publish HF models, generate a model card, merge adapters and convert/quantize GGUF. Final trainer checkpoints/artifact events idempotently create ModelArtifact rows with run/base/dataset/backend/method/reference metadata. An API normalization layer maps historical strings to Causal LM, Adapter, Merged Model, Reward Model, Reference Model, and Quantized Model categories and exposes evaluation capabilities without changing the table. Reward artifacts are excluded from generation, deployment, causal merge, and ordinary base-model selection. Card generation remains tied to publish, not run completion. ModelArtifact still has no explicit parent artifact FK; preserve old kind strings if a future migration adds one.
 
 Merge runs in an isolated worker and writes a new artifact. Current checks establish adapter kind, not pinned base/tokenizer/quant-state compatibility. GGUF invokes external llama.cpp tools, stores progress/logs and artifact status; there is no unified ExportJob or calibration dataset. Ollama import creates a temporary FROM-only Modelfile and runs CLI; template/stops/generation defaults and export-only packaging are absent.
 
@@ -110,7 +112,7 @@ Compose separates GPU backend, CPU/dev variants, nginx frontend and optional ded
 
 ## Frontend architecture
 
-React 18 + TypeScript + Vite; React Router lazy pages, React Query server state, workflow hooks for persisted drafts, Tailwind/Radix components, Recharts monitors, centralized API/error/log clients. Routes: Dashboard, Projects, Datasets, Pretrain, Domain Adaptation, Finetune, Eval Lab, Registry, Runs, Serving, System.
+React 18 + TypeScript + Vite; React Router lazy pages, React Query server state, workflow hooks for persisted drafts, Tailwind/Radix components, Recharts monitors, centralized API/error/log clients. Routes: Dashboard, Projects, Datasets, Pretrain, Domain Adaptation, Finetune, Alignment, Eval Lab, Registry, Runs, Serving, System.
 
 TrainingStudio, model/dataset pickers, recommendation/fit panels and RunMonitor are shared. Data Lab already has schema/prepare/tokenizer/quality views. Extend nested areas; do not multiply top-level screens. Flat RunForm -> payload and formFromConfig omit unsupported advanced fields, so clone/edit/export roundtrip is not lossless for full RunConfig. Static METHODS now supplies presentation copy only; backend descriptors decide availability. Frontend hook lint warning is recorded in STATUS.
 
@@ -124,6 +126,6 @@ Documentation covers architecture/install/configuration/APIs/pages/Docker/troubl
 
 ## Baseline and first action
 
-See [STATUS.md](STATUS.md) for exact commands/results and runtime limits. Current foundation verification: 84 backend tests, 9 frontend tests, Ruff, frontend lint/build/type check. The audit baseline also validated three Compose configs, isolated fresh migration, and two startup/shutdown cycles. Existing warnings remain; no regression was introduced by the foundation changes.
+See [STATUS.md](STATUS.md) for exact commands/results and runtime limits. Step 16 verification: 165 backend tests passed on the isolated CPU ML stack; the lean stack passed 144 with two optional skips. Eighteen frontend tests, Ruff, frontend build/type check passed; ESLint retains one existing warning. Native TRL tiny jobs now execute locally. No CUDA or installed optional-engine training job was performed; the packaged Torch 2.11 GPU stack is unverified.
 
-**Implement A01 next:** preserve Alpaca system/history at canonicalize with regression fixtures. The foundation review added no database migration and did not implement A01 or any other phase feature.
+**Next within the current Phase C scope: C01 — durably pin policy/reference identities and retain them on resume.** Then complete C08's base-versus-trained regression gate. Earlier Phase A/B gaps remain tracked; do not begin optimization while Phase C exit criteria remain unmet.

@@ -50,7 +50,12 @@ def vllm_available() -> bool:
 class VLLMServerManager:
     """Owns at most one running vLLM server subprocess at a time."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "vllm", port: int | None = None) -> None:
+        self.name = name
+        self.port = port or _settings.vllm_port
+        self._options = None
+        self.logs: list[str] = []
+        self._drain_task: asyncio.Task | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._model: str | None = None
         self._lock = asyncio.Lock()
@@ -65,36 +70,42 @@ class VLLMServerManager:
         return None
 
     def base_url(self) -> str:
-        return f"http://127.0.0.1:{_settings.vllm_port}"
+        return f"http://127.0.0.1:{self.port}"
 
-    async def ensure(self, model_ref: str, log_cb: LogCallback = None) -> None:
+    async def ensure(self, model_ref: str, log_cb: LogCallback = None, *, options=None, managed=False) -> None:
         """Start (or reuse) a vLLM server for ``model_ref``. Single-flight via lock."""
         async with self._lock:
-            if self.model == model_ref:
+            if self.model == model_ref and self._options == options:
                 self._last_used = time.time()
                 return  # already warm for this exact model
             await self._stop_locked()
             if log_cb:
                 log_cb(f"Starting vLLM server for {model_ref} (first request after a model change is slower)…")
             log.info("starting vLLM server: model=%s port=%s", model_ref, _settings.vllm_port)
+            from app.serving.runtime_options import MODULES, option_arguments, probe_flags
+            if options is not None:
+                extra = option_arguments(self.name, options, await probe_flags(self.name))
+            else:
+                extra = ["--gpu-memory-utilization", str(_settings.vllm_gpu_memory_utilization),
+                         "--max-model-len", str(_settings.vllm_max_model_len), "--dtype", "auto"]
             self._proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-u", "-m", "vllm.entrypoints.openai.api_server",
-                "--model", model_ref,
-                "--port", str(_settings.vllm_port),
-                "--gpu-memory-utilization", str(_settings.vllm_gpu_memory_utilization),
-                "--max-model-len", str(_settings.vllm_max_model_len),
-                "--dtype", "auto",
+                sys.executable, "-u", "-m", MODULES[self.name],
+                "--model" if self.name == "vllm" else "--model-path", model_ref,
+                "--host", "127.0.0.1", "--port", str(self.port), *extra,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             )
             self._model = model_ref
-            asyncio.create_task(self._drain_stdout(log_cb))
+            self._options = options
+            self.logs = []
+            self._drain_task = asyncio.create_task(self._drain_stdout(log_cb))
             try:
                 await self._wait_healthy()
             except BaseException:
                 await self._stop_locked()
                 raise
             self._last_used = time.time()
-            self._schedule_idle_check()
+            if not managed:
+                self._schedule_idle_check()
 
     async def _drain_stdout(self, log_cb: LogCallback) -> None:
         proc = self._proc
@@ -102,6 +113,13 @@ class VLLMServerManager:
             return
         async for raw in proc.stdout:
             line = raw.decode(errors="replace").strip()
+            if line:
+                from app.integrations.hf_hub import _token
+                token = _token()
+                if token:
+                    line = line.replace(token, "[REDACTED]")
+                self.logs.append(line)
+                self.logs = self.logs[-200:]
             if line and log_cb:
                 log_cb(line)
 
@@ -176,21 +194,20 @@ class VLLMServerManager:
 
     async def _stop_locked(self) -> None:
         if self._idle_task:
-            self._idle_task.cancel()
+            if self._idle_task is not asyncio.current_task():
+                self._idle_task.cancel()
             self._idle_task = None
         proc, self._proc = self._proc, None
         self._model = None
         if proc is not None and proc.returncode is None:
             log.info("stopping vLLM server")
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except (TimeoutError, ProcessLookupError):
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
+            from app.core.runner import _terminate_process_tree
+            await asyncio.to_thread(_terminate_process_tree, proc.pid)
+            await proc.wait()
+        if self._drain_task:
+            await asyncio.gather(self._drain_task, return_exceptions=True)
+            self._drain_task = None
 
 
 manager = VLLMServerManager()
+sglang_manager = VLLMServerManager("sglang", 8803)

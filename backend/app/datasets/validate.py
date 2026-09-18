@@ -185,6 +185,7 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
     seen: set[str] = set()
     duplicates = 0
     errors = 0
+    kto_labels = {True: 0, False: 0}
     for lineno, row in _iter_records(path, fmt):
         if isinstance(row, json.JSONDecodeError):
             report.error(f"Invalid JSON: {row.msg}", line=lineno)
@@ -206,8 +207,25 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
             if err:
                 stats.invalid_rows += 1
 
+        canonical = None
+        if kind in {DatasetKind.PREFERENCE, DatasetKind.KTO}:
+            from app.datasets.adapters import DatasetSchemaError, canonicalize
+
+            try:
+                canonical = canonicalize(row)
+                expected = "preference" if kind == DatasetKind.PREFERENCE else "kto"
+                if canonical.kind != expected:
+                    raise DatasetSchemaError(f"Expected canonical {expected} data, got {canonical.kind}.")
+                if kind == DatasetKind.KTO:
+                    kto_labels[canonical.desirable] += 1
+            except DatasetSchemaError as exc:
+                if errors < 20:
+                    report.error(str(exc), line=lineno)
+                errors += 1
+                stats.invalid_rows += 1
+
         try:
-            text = _extract_text(row)
+            text = canonical.content_text() if canonical is not None else _extract_text(row)
         except ValueError:
             text = ""
         toks = estimate_tokens(text)
@@ -246,6 +264,16 @@ def _validate_records(path: Path, fmt: str, kind: DatasetKind,
             )
         elif stats.num_rows < GOOD_INSTRUCTION_ROWS:
             report.info(f"{stats.num_rows} examples — workable; {GOOD_INSTRUCTION_ROWS}+ is better.")
+    if kind == DatasetKind.KTO:
+        if not kto_labels[True] or not kto_labels[False]:
+            report.error("KTO requires both desirable and undesirable examples.")
+        else:
+            ratio = max(kto_labels.values()) / min(kto_labels.values())
+            if ratio > 4:
+                report.warn(
+                    f"KTO label imbalance is {kto_labels[True]} desirable to "
+                    f"{kto_labels[False]} undesirable examples."
+                )
     report.info(f"{stats.num_rows:,} rows, ~{stats.num_tokens_est:,} estimated tokens.")
 
 

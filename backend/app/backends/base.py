@@ -16,12 +16,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from app.capabilities import (
     Capability,
+    OptimizationCapability,
     PeftMethodCapability,
     QuantizationCapability,
     TokenizerCapabilities,
@@ -36,6 +37,9 @@ from app.domain import (
     TaskType,
     ValidationReport,
 )
+
+if TYPE_CHECKING:
+    from app.models.capabilities import ModelCapabilities
 
 
 @dataclass
@@ -71,6 +75,12 @@ class TrainingBackendCapabilities(BaseModel):
     tokenizer: TokenizerCapabilities
     peft: dict[str, PeftMethodCapability] = Field(default_factory=dict)
     quantization: dict[str, QuantizationCapability] = Field(default_factory=dict)
+    precision: dict[str, Capability] = Field(default_factory=dict)
+    attention: dict[str, Capability] = Field(default_factory=dict)
+    gradient_checkpointing: dict[str, Capability] = Field(default_factory=dict)
+    rope: dict[str, Capability] = Field(default_factory=dict)
+    optimizations: dict[str, OptimizationCapability] = Field(default_factory=dict)
+    optional_features: dict[str, Capability] = Field(default_factory=dict)
     platforms: list[str] = Field(default_factory=list)
     architectures: list[str] = Field(default_factory=list)
     required_dependencies: list[str] = Field(default_factory=list)
@@ -157,10 +167,26 @@ def list_backends() -> list[TrainingBackend]:
 class BackendSelection:
     backend: TrainingBackend
     capabilities: TrainingBackendCapabilities
+    requested_backend: str
+    reason: str
+    alternatives: tuple[dict[str, str], ...] = ()
+
+    def as_dict(self) -> dict:
+        return {
+            "requested_backend": self.requested_backend,
+            "selected_backend": self.backend.name,
+            "reason": self.reason,
+            "alternatives": list(self.alternatives),
+        }
 
 
 class BackendSelector(Protocol):
-    def select(self, cfg: RunConfig) -> BackendSelection: ...
+    def select(
+        self,
+        cfg: RunConfig,
+        hw: HardwareProfile | None = None,
+        model: ModelCapabilities | None = None,
+    ) -> BackendSelection: ...
 
 
 class RegisteredBackendSelector:
@@ -170,13 +196,178 @@ class RegisteredBackendSelector:
     enough runtime evidence to make a reliable decision.
     """
 
-    def select(self, cfg: RunConfig) -> BackendSelection:
+    def select(
+        self,
+        cfg: RunConfig,
+        hw: HardwareProfile | None = None,
+        model: ModelCapabilities | None = None,
+    ) -> BackendSelection:
         backend = get_backend(cfg.backend)
         capabilities = backend.capabilities()
-        return BackendSelection(backend=backend, capabilities=capabilities)
+        alternatives = tuple(
+            {"backend": candidate.name, "reason": "An explicit backend was requested."}
+            for candidate in list_backends()
+            if candidate.name != backend.name
+        )
+        return BackendSelection(
+            backend=backend,
+            capabilities=capabilities,
+            requested_backend=cfg.backend,
+            reason=f"Backend '{cfg.backend}' was requested explicitly.",
+            alternatives=alternatives,
+        )
 
 
-backend_selector: BackendSelector = RegisteredBackendSelector()
+class AutoBackendSelector(RegisteredBackendSelector):
+    """Resolve Auto without changing the requested operation semantics."""
+
+    def select(
+        self,
+        cfg: RunConfig,
+        hw: HardwareProfile | None = None,
+        model: ModelCapabilities | None = None,
+    ) -> BackendSelection:
+        if cfg.backend != "auto":
+            return super().select(cfg, hw, model)
+        hw = hw or HardwareProfile()
+        candidates = list_backends()
+        compatible: list[tuple[int, TrainingBackend, TrainingBackendCapabilities, str]] = []
+        rejected: list[dict[str, str]] = []
+        for backend in candidates:
+            descriptor = backend.capabilities()
+            reason = self._incompatibility(cfg, hw, model, descriptor)
+            if reason:
+                rejected.append({"backend": backend.name, "reason": reason})
+                continue
+            priority = self._priority(cfg, backend.name)
+            compatible.append((priority, backend, descriptor, self._selection_reason(cfg, backend.name)))
+        if not compatible:
+            detail = "; ".join(f"{item['backend']}: {item['reason']}" for item in rejected)
+            raise KeyError(f"No compatible training backend for this operation. {detail}")
+        compatible.sort(key=lambda item: (item[0], item[1].name))
+        _, backend, descriptor, reason = compatible[0]
+        for _, alternative, _, _ in compatible[1:]:
+            rejected.append({
+                "backend": alternative.name,
+                "reason": f"Compatible, but ranked below '{backend.name}' for this exact operation.",
+            })
+        return BackendSelection(
+            backend=backend,
+            capabilities=descriptor,
+            requested_backend="auto",
+            reason=reason,
+            alternatives=tuple(rejected),
+        )
+
+    @staticmethod
+    def _incompatibility(cfg, hw, model, descriptor: TrainingBackendCapabilities) -> str | None:
+        if not descriptor.availability.allowed:
+            return descriptor.availability.reason
+        task_capability = descriptor.tasks.get(cfg.task.value)
+        if not task_capability or not task_capability.allowed:
+            return task_capability.reason if task_capability else f"Task '{cfg.task.value}' is unsupported."
+        method_capability = descriptor.methods.get(cfg.method.value)
+        if not method_capability or not method_capability.allowed:
+            return method_capability.reason if method_capability else f"Method '{cfg.method.value}' is unsupported."
+        if descriptor.name == "unsloth" and not hw.cuda_available:
+            return "Unsloth requires a detected CUDA GPU."
+        if cfg.method == Method.QLORA and not hw.cuda_available:
+            return "QLoRA requires a detected CUDA GPU."
+        if cfg.runtime.attention == "flash_attention_2" and not hw.cuda_available:
+            return "FlashAttention 2 requires CUDA."
+        for group, choice in (
+            (descriptor.precision, cfg.runtime.precision),
+            (descriptor.attention, cfg.runtime.attention),
+            (descriptor.gradient_checkpointing, cfg.runtime.gradient_checkpointing),
+        ):
+            capability = group.get(choice)
+            if capability is not None and not capability.allowed:
+                return capability.reason
+        if cfg.runtime.rope.enabled:
+            capability = descriptor.rope.get(cfg.runtime.rope.type)
+            if capability is None or not capability.allowed:
+                return capability.reason if capability else f"RoPE policy '{cfg.runtime.rope.type}' is unsupported."
+        if cfg.runtime.use_liger:
+            capability = descriptor.optimizations.get("liger")
+            capability = capability.support if capability is not None else descriptor.optional_features.get("liger")
+            if capability is None or not capability.allowed:
+                return capability.reason if capability else "Liger is unsupported."
+        requested_optimizations = []
+        if cfg.lora.use_rslora:
+            requested_optimizations.append("rslora")
+        if cfg.lora.init_method != "standard":
+            requested_optimizations.append(cfg.lora.init_method)
+        if cfg.lora.lora_plus_lr_ratio is not None:
+            requested_optimizations.append("lora_plus")
+        if cfg.optim.strategy != "default":
+            requested_optimizations.append(cfg.optim.strategy)
+        if cfg.runtime.neftune_noise_alpha is not None:
+            requested_optimizations.append("neftune")
+        for option_id in requested_optimizations:
+            capability = descriptor.optimizations.get(option_id)
+            if capability is None or not capability.support.allowed:
+                return (
+                    capability.support.reason
+                    if capability is not None
+                    else f"Optimization '{option_id}' is not provided by {descriptor.display_name}."
+                )
+        tokenizer_mode = descriptor.tokenizer.modes.get(cfg.tokenizer.mode)
+        if tokenizer_mode is None or not tokenizer_mode.allowed:
+            return tokenizer_mode.reason if tokenizer_mode else f"Tokenizer mode '{cfg.tokenizer.mode}' is unsupported."
+        if cfg.task == TaskType.FINETUNE:
+            loss_policy = descriptor.tokenizer.loss_policies.get(cfg.tokenizer.loss_policy)
+            if loss_policy is None or not loss_policy.allowed:
+                return loss_policy.reason if loss_policy else f"Loss policy '{cfg.tokenizer.loss_policy}' is unsupported."
+        if cfg.tokenizer.chat_template:
+            custom_template = descriptor.tokenizer.templates.explicit_override
+            if not custom_template.allowed:
+                return custom_template.reason
+        if cfg.task == TaskType.ALIGNMENT:
+            objective = descriptor.optional_features.get(f"objective:{cfg.alignment.objective}")
+            if objective is None:
+                return f"Objective '{cfg.alignment.objective}' is not provided by {descriptor.display_name}."
+            if not objective.allowed:
+                return objective.reason
+            if cfg.alignment.objective == "dpo":
+                loss = descriptor.optional_features.get(f"dpo_loss:{cfg.alignment.dpo_loss_variant}")
+                if loss is None or not loss.allowed:
+                    return loss.reason if loss else "The requested DPO loss is unsupported."
+            reference = descriptor.optional_features.get(f"reference:{cfg.alignment.reference.strategy}")
+            if reference is None or not reference.allowed:
+                return reference.reason if reference else "The requested alignment reference strategy is unsupported."
+        if model is not None and descriptor.name in {"transformers", "unsloth"}:
+            capability = model.backends.get(descriptor.name)
+            if capability is not None and not capability.allowed:
+                return capability.reason
+        return None
+
+    @staticmethod
+    def _priority(cfg: RunConfig, backend_name: str) -> int:
+        if cfg.task == TaskType.PRETRAIN:
+            order = {"scratch": 0}
+        elif cfg.task == TaskType.ALIGNMENT:
+            order = {"transformers": 0, "llamafactory": 1, "unsloth": 2}
+        elif cfg.runtime.gradient_checkpointing == "backend_optimized":
+            order = {"unsloth": 0}
+        elif cfg.method in {Method.LORA, Method.QLORA, Method.DORA}:
+            order = {"unsloth": 0, "transformers": 1, "llamafactory": 2}
+        else:
+            order = {"transformers": 0, "llamafactory": 1, "unsloth": 2}
+        return order.get(backend_name, 100)
+
+    @staticmethod
+    def _selection_reason(cfg: RunConfig, backend_name: str) -> str:
+        operation = f"{cfg.task.value}/{cfg.method.value}"
+        if backend_name == "scratch":
+            return f"Selected the built-in scratch engine for {operation}."
+        if backend_name == "unsloth":
+            return f"Selected installed Unsloth acceleration for compatible {operation} on CUDA."
+        if backend_name == "llamafactory":
+            return f"Selected the optional installed LLaMA-Factory engine for compatible {operation}."
+        return f"Selected the native Transformers/TRL/PEFT engine for broad, exact {operation} semantics."
+
+
+backend_selector: BackendSelector = AutoBackendSelector()
 
 
 def load_builtin_backends() -> None:
@@ -186,8 +377,9 @@ def load_builtin_backends() -> None:
     machine without the GPU stack can still register the metadata-only surface
     of each backend. Heavy imports live inside each backend's ``run``.
     """
-    from app.backends import scratch_backend, unsloth_backend
+    from app.backends import llamafactory_backend, scratch_backend, unsloth_backend
 
     register_backend(unsloth_backend.UnslothBackend())
     register_backend(unsloth_backend.UnslothBackend(name="transformers"))
     register_backend(scratch_backend.ScratchBackend())
+    register_backend(llamafactory_backend.LlamaFactoryBackend())

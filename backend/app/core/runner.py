@@ -22,7 +22,7 @@ from app.core.events import parse_event
 from app.core.log_capture import append_log_line
 from app.core.logging_config import get_logger
 from app.core.ws import hub
-from app.db.models import Checkpoint, Run
+from app.db.models import Checkpoint, ModelArtifact, Run
 from app.db.session import engine
 from app.domain import RunConfig, RunStatus
 
@@ -62,9 +62,9 @@ class RunHandle:
         # ...then escalate to termination to guarantee VRAM release.
         # terminate() is cross-platform (SIGTERM on POSIX, TerminateProcess on
         # Windows; send_signal(SIGTERM) is unreliable on Windows).
+        await asyncio.to_thread(_terminate_process_tree, self.proc.pid)
         try:
-            self.proc.terminate()
-            await asyncio.wait_for(self.proc.wait(), timeout=3)
+            await asyncio.wait_for(self.proc.wait(), timeout=5)
         except (TimeoutError, ProcessLookupError):
             try:
                 self.proc.kill()
@@ -182,9 +182,16 @@ async def _pump_stdout(run_id: int, proc: asyncio.subprocess.Process, err_captur
         elif event.type == "error":
             append_log_line(lpath, "error", f"{event.code}: {event.message}")
         elif event.type == "artifact":
+            _record_artifact(run_id, event.kind, event.path, event.metadata)
             append_log_line(lpath, "info", f"Artifact {event.kind}: {event.path}")
         elif event.type == "progress" and event.message:
             append_log_line(lpath, "info", event.message)
+        elif event.type == "profile":
+            append_log_line(
+                lpath,
+                "info",
+                f"Profile {event.name}: {json.dumps(event.values, ensure_ascii=False, sort_keys=True)}",
+            )
 
         if event.type == "status" and event.status == "failed" and event.detail:
             err_capture["msg"] = event.detail
@@ -197,8 +204,83 @@ async def _pump_stdout(run_id: int, proc: asyncio.subprocess.Process, err_captur
 
 def _record_checkpoint(run_id: int, step: int, path: str, is_final: bool) -> None:
     with Session(engine) as db:
-        db.add(Checkpoint(run_id=run_id, step=step, path=path, is_final=is_final))
+        existing = db.exec(
+            select(Checkpoint).where(Checkpoint.run_id == run_id, Checkpoint.path == path)
+        ).first()
+        if existing:
+            existing.step = step
+            existing.is_final = existing.is_final or is_final
+            db.add(existing)
+        else:
+            db.add(Checkpoint(run_id=run_id, step=step, path=path, is_final=is_final))
         db.commit()
+    if is_final:
+        _record_artifact(run_id, "model", path, {"source": "final_checkpoint"})
+
+
+def _record_artifact(run_id: int, kind: str, path: str, metadata: dict | None = None) -> None:
+    """Idempotently register a backend artifact using the existing lineage model."""
+    with Session(engine) as db:
+        run = db.get(Run, run_id)
+        if not run:
+            return
+        existing = db.exec(
+            select(ModelArtifact).where(
+                ModelArtifact.run_id == run_id,
+                ModelArtifact.local_path == path,
+            )
+        ).first()
+        lineage = {
+            "backend": run.backend,
+            "method": run.method,
+            "task": run.task,
+            "base_model": run.base_model,
+            "revision": run.config.get("revision"),
+            "dataset_id": run.dataset_id,
+            "reference": (run.config.get("alignment") or {}).get("reference"),
+            **(metadata or {}),
+        }
+        effective_kind = (
+            "adapter" if kind == "model" and run.method in {"lora", "qlora", "dora"} else kind
+        )
+        if existing:
+            existing.kind = effective_kind
+            existing.meta = {**(existing.meta or {}), **lineage}
+            existing.status = "ready"
+            db.add(existing)
+        else:
+            db.add(ModelArtifact(
+                name=run.name,
+                kind=effective_kind,
+                run_id=run_id,
+                base_model=run.base_model,
+                local_path=path,
+                status="ready",
+                meta=lineage,
+            ))
+        db.commit()
+
+
+def _terminate_process_tree(pid: int) -> None:
+    """Terminate descendants before their worker parent so external engines cannot orphan."""
+    try:
+        import psutil
+
+        parent = psutil.Process(pid)
+        processes = [*reversed(parent.children(recursive=True)), parent]
+        for process in processes:
+            try:
+                process.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(processes, timeout=3)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+    except Exception:
+        return
 
 
 def _record_last_metric(run_id: int, metrics: dict) -> None:
@@ -241,7 +323,8 @@ def _finalize(run_id: int, returncode: int | None, cancelled: bool, error: str |
 
 def _redact(value):
     if isinstance(value, dict):
-        return {key: ("***" if any(secret in key.lower() for secret in ("token", "secret", "password", "api_key")) else _redact(item)) for key, item in value.items()}
+        credential_keys = {"token", "hf_token", "access_token", "auth_token", "api_token", "bearer_token", "hugging_face_hub_token"}
+        return {key: ("***" if key.lower() in credential_keys or any(secret in key.lower() for secret in ("secret", "password", "api_key")) else _redact(item)) for key, item in value.items()}
     if isinstance(value, list):
         return [_redact(item) for item in value]
     return value

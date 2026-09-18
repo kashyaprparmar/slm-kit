@@ -1,6 +1,6 @@
 # Implementation roadmap
 
-Architecture foundation complete; **no Phase A feature task has started**. Requirement findings are in [GAP_ANALYSIS.md](GAP_ANALYSIS.md); current health is in [STATUS.md](STATUS.md).
+Architecture foundation and Phase A1 canonical dataset foundation are complete. **Phase A final review result: Partially Complete. A01 and A04 are verified; A02 has a cache-safety slice; A03 and A05-A18 remain incomplete.** Requirement findings are in [GAP_ANALYSIS.md](GAP_ANALYSIS.md); current health is in [STATUS.md](STATUS.md).
 
 ## Planning contract
 
@@ -18,7 +18,7 @@ The **current implementation** for every task is explicitly the linked Rxx findi
 - F: explicit distributed execution; single GPU remains default.
 - G: guarded experimental work and complete verified lifecycle report.
 
-**First task: A01 — Preserve Alpaca system and history.** It is a narrow, reproducible data-loss defect at the existing canonical boundary and needs no migration. A02 and A03 are the next correctness priorities before building a training cache.
+**Next task: A05 — Expand reusable field mapping.** Add named/configurable adapters behind the established registry, starting with saved ShareGPT mapping replay and conflict validation. Keep preference, KTO, tool, and multimodal execution gated until their task acceptance criteria pass.
 
 ## Foundation checkpoint (2026-09-15)
 
@@ -26,7 +26,7 @@ The architecture review established shared contracts needed by the phase tasks w
 
 - `TrainingStage` and versioned `RunConfig` operation identity preserve existing task/method values.
 - `TrainingBackendCapabilities` and an explicit `BackendSelector` drive backend validation metadata and frontend method/backend visibility. Automatic selection remains B04.
-- `DatasetAdapter` registration now owns detect/validate/canonicalize/preview/stage contracts behind the old facade. New mappings and formats remain A01/A05-A07/A14.
+- `DatasetAdapter` registration owns detect/validate/canonicalize/preview/fingerprint/stage contracts behind the old facade. A01 is complete; v2 preference/KTO/tool/media record contracts exist, while their adapters and semantic validation remain A05-A07.
 - `ModelFamilyAdapter`, tokenizer/template, PEFT, quantization, and serving-provider capability models extend existing registries.
 - Optional dependency probes have one import-light owner.
 - The training event union accepts additive progress/resource/artifact/warning/profile/error envelopes. Emission, persistence, and UI telemetry remain B18/D08.
@@ -40,13 +40,13 @@ No task is treated as fully complete merely because its interface was establishe
 - R03 (Missing): B14, B15.
 - R04 (Partially implemented): B01, B06, C01.
 - R05 (Missing): B05, B06.
-- R06 (Implemented but needs enhancement): A01, A04.
-- R07 (Partially implemented): A01.
+- R06 (Already implemented correctly): A01, A04.
+- R07 (Already implemented correctly): A01.
 - R08 (Already implemented correctly): A04.
 - R09 (Partially implemented): A04, A05, A07.
 - R10 (Partially implemented): A05.
 - R11 (Partially implemented): A06.
-- R12 (Missing): A06.
+- R12 (Partially implemented): A06.
 - R13 (Partially implemented): A07.
 - R14 (Partially implemented): A06, G01, G02.
 - R15 (Missing): A17, A18.
@@ -73,17 +73,17 @@ No task is treated as fully complete merely because its interface was establishe
 - R36 (Partially implemented): B07.
 - R37 (Implemented but needs enhancement): A12, B08.
 - R38 (Partially implemented): B09, B10.
-- R39 (Missing): C01, C02.
-- R40 (Missing): C01, C03, C04, C05.
-- R41 (Missing): C01, C06.
-- R42 (Missing): C01, C07.
-- R43 (Missing): C01.
+- R39 (Partially implemented): C01, C02.
+- R40 (Partially implemented): C01, C03, C04, C05.
+- R41 (Partially implemented): C01, C06.
+- R42 (Partially implemented): C01, C07.
+- R43 (Partially implemented): C01.
 - R44 (Missing): G03.
 - R45 (Missing): B11.
 - R46 (Missing): D07.
 - R47 (Missing): D07.
 - R48 (Implemented but needs enhancement): B11, B16.
-- R49 (Missing): C08.
+- R49 (Partially implemented): C08.
 - R50 (Missing): F01, F02.
 - R51 (Missing): F03.
 - R52 (Missing): F04.
@@ -129,7 +129,7 @@ No task is treated as fully complete merely because its interface was establishe
 - R92 (Partially implemented): G05.
 ## A01 — Preserve Alpaca system and history
 
-- **Phase / state / risk:** A / Not started / medium.
+- **Phase / state / risk:** A / Complete 2026-09-15 / medium.
 - **Current implementation:** [R07](GAP_ANALYSIS.md#r07), [R06](GAP_ANALYSIS.md#r06), [R85](GAP_ANALYSIS.md#r85). Read those code findings before editing.
 - **Dependencies:** Audit complete; no implementation dependency.
 - **Relevant files:** `backend/app/datasets/adapters.py`, `backend/tests/test_dataset_adapters.py`.
@@ -141,8 +141,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## A02 — Resolve mutable tokenizer revisions safely
 
-- **Phase / state / risk:** A / Not started / high.
-- **Current implementation:** [R19](GAP_ANALYSIS.md#r19), [R20](GAP_ANALYSIS.md#r20), [R76](GAP_ANALYSIS.md#r76). Read those code findings before editing.
+- **Phase / state / risk:** A / Partially complete / high.
+- **Current implementation:** Mutable branches/tags and abbreviated revisions now bypass the pre-resolution profile cache; only full 40-character Hugging Face commits can reuse before lookup. Full serialized tokenizer behavior and local content identity remain unresolved. See [R19](GAP_ANALYSIS.md#r19), [R20](GAP_ANALYSIS.md#r20), [R76](GAP_ANALYSIS.md#r76).
 - **Dependencies:** Audit complete; no implementation dependency.
 - **Relevant files:** `backend/app/api/data_lab.py`, `backend/app/train_entry/tokenizer_profile.py`.
 - **Required work / backend and API impact:** Resolve branch/tag to immutable commit before cache lookup; fingerprint serialized tokenizer behavior.
@@ -165,8 +165,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## A04 — Introduce adapter registration behind canonicalize
 
-- **Phase / state / risk:** A / Foundation implemented; phase acceptance pending A01 / medium.
-- **Current implementation:** `DatasetAdapter` and built-in registration now preserve the existing facade and formats. A01 must extend pair semantics before A04 can pass its phase gate. See [R06](GAP_ANALYSIS.md#r06), [R08](GAP_ANALYSIS.md#r08), [R09](GAP_ANALYSIS.md#r09).
+- **Phase / state / risk:** A / Complete 2026-09-15 / medium.
+- **Current implementation:** `DatasetAdapter` and built-in registration preserve the existing facade and formats. Structured validation, canonical preview, stable semantic fingerprinting, and stage declarations are verified; current v1 rows roundtrip and ambiguous detection fails. See [R06](GAP_ANALYSIS.md#r06), [R08](GAP_ANALYSIS.md#r08), [R09](GAP_ANALYSIS.md#r09).
 - **Dependencies:** A01.
 - **Relevant files:** `backend/app/datasets/adapters.py`, `backend/app/datasets/validate.py`.
 - **Required work / backend and API impact:** Preserve facade; adapter detect/validate/canonicalize/preview/stages descriptors.
@@ -190,7 +190,7 @@ No task is treated as fully complete merely because its interface was establishe
 ## A06 — Add canonical preference and KTO records
 
 - **Phase / state / risk:** A / Not started / high.
-- **Current implementation:** [R11](GAP_ANALYSIS.md#r11), [R12](GAP_ANALYSIS.md#r12), [R14](GAP_ANALYSIS.md#r14). Read those code findings before editing.
+- **Current implementation:** Strict v2 preference and KTO record contracts and fingerprints exist, and their markers are safely gated. Source-format canonicalization, preparation, reporting, and training remain A06. See [R11](GAP_ANALYSIS.md#r11), [R12](GAP_ANALYSIS.md#r12), [R14](GAP_ANALYSIS.md#r14).
 - **Dependencies:** A04.
 - **Relevant files:** `backend/app/datasets/adapters.py`, `backend/app/domain.py`, `backend/app/datasets/validate.py`.
 - **Required work / backend and API impact:** Validate paired/conversational preferences and strict boolean desirability; keep training gated.
@@ -202,7 +202,7 @@ No task is treated as fully complete merely because its interface was establishe
 ## A07 — Add tool-call canonical validation
 
 - **Phase / state / risk:** A / Not started / high.
-- **Current implementation:** [R13](GAP_ANALYSIS.md#r13), [R09](GAP_ANALYSIS.md#r09). Read those code findings before editing.
+- **Current implementation:** Strict v2 tool definitions, calls, messages, media references, and fingerprints exist. Source adapters and semantic call-ID/role validation remain A07; training stays gated. See [R13](GAP_ANALYSIS.md#r13), [R09](GAP_ANALYSIS.md#r09).
 - **Dependencies:** A04.
 - **Relevant files:** `backend/app/datasets/adapters.py`, `backend/app/datasets/validate.py`.
 - **Required work / backend and API impact:** Validate function schema, JSON args, unique IDs, matching responses and role sequence.
@@ -345,8 +345,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B01 — Add authoritative backend and stage descriptors
 
-- **Phase / state / risk:** B / Foundation implemented; runtime evidence acceptance pending / high.
-- **Current implementation:** Backend/stage/method/PEFT/quantization descriptors, dependency availability, versioned operation identity, and frontend consumption are implemented. Runtime compatibility evidence and capability snapshots remain B01/B02 work. See [R02](GAP_ANALYSIS.md#r02), [R04](GAP_ANALYSIS.md#r04), [R26](GAP_ANALYSIS.md#r26), [R78](GAP_ANALYSIS.md#r78), [R83](GAP_ANALYSIS.md#r83).
+- **Phase / state / risk:** B / Partially complete; runtime evidence acceptance pending / high.
+- **Current implementation:** Backend/stage/method/PEFT/quantization/runtime descriptors, dependency availability, versioned operation identity, API validation, capability-gated frontend controls, alignment objectives, and optional LLaMA-Factory status are implemented. Requested/effective backend decisions are persisted in Run config JSON. Runtime compatibility probes and complete capability snapshots remain B01/B02 work. See [R02](GAP_ANALYSIS.md#r02), [R04](GAP_ANALYSIS.md#r04), [R26](GAP_ANALYSIS.md#r26), [R78](GAP_ANALYSIS.md#r78), [R83](GAP_ANALYSIS.md#r83).
 - **Dependencies:** A16.
 - **Relevant files:** `backend/app/backends/base.py`, `backend/app/models/capabilities.py`, `backend/app/domain.py`, `backend/app/api/runs.py`.
 - **Required work / backend and API impact:** Separate stage/method/engine capabilities and installed compatibility evidence.
@@ -381,8 +381,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B04 — Resolve backend selection before launch
 
-- **Phase / state / risk:** B / Selection interface implemented; automatic resolution not started / high.
-- **Current implementation:** `RegisteredBackendSelector` resolves explicit existing registry keys for API estimate/create/export paths. It deliberately performs no fallback. See [R83](GAP_ANALYSIS.md#r83), [R78](GAP_ANALYSIS.md#r78).
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** `AutoBackendSelector` resolves before enqueue from operation, model metadata, hardware, dependencies, objective, tokenizer/loss policy, and runtime settings. Requested/effective backend plus selected/rejected reasons are persisted in Run config JSON and displayed in the plan. Strict explicit requests and CPU fallback behavior are unit-tested. Loader-time Unsloth fallback evidence is logged but not yet persisted separately. See [R83](GAP_ANALYSIS.md#r83), [R78](GAP_ANALYSIS.md#r78).
 - **Dependencies:** B02, B03.
 - **Relevant files:** `backend/app/api/runs.py`, `backend/app/models/capabilities.py`, `frontend/src/components/studio/TrainingStudio.tsx`.
 - **Required work / backend and API impact:** Auto plan checks operation/model/hardware/dependencies; revalidate in worker.
@@ -393,8 +393,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B05 — Discover adapter and freeze targets
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R05](GAP_ANALYSIS.md#r05), [R27](GAP_ANALYSIS.md#r27), [R56](GAP_ANALYSIS.md#r56). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** `train_entry/module_selection.py` inspects the loaded model for auto/all-linear/attention/MLP/custom LoRA targets and freeze groups, rejects empty or unknown selections, and emits exact targets plus actual counts. API estimates remain metadata-based and a real PEFT runtime fixture is pending.
 - **Dependencies:** B03.
 - **Relevant files:** `backend/app/models/capabilities.py`, `backend/app/backends/unsloth_backend.py`, `backend/app/domain.py`.
 - **Required work / backend and API impact:** Architecture module inspection; auto/all-linear/attention/MLP/custom targets; trainable counts.
@@ -405,8 +405,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B06 — Implement freeze tuning execution
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R05](GAP_ANALYSIS.md#r05), [R04](GAP_ANALYSIS.md#r04). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** Native training applies last-N transformer layers, embeddings, LM head, norms, and selected-module policy before trainer construction. The UI and RunConfig preserve the policy; fake-architecture tests verify selection and counts, while a real optimizer-step mutation test is pending.
 - **Dependencies:** B05.
 - **Relevant files:** `backend/app/domain.py`, `backend/app/backends/unsloth_backend.py`, `backend/app/integrations/estimator.py`.
 - **Required work / backend and API impact:** Last N layers, embeddings/head/norm/selected modules with explicit trainability.
@@ -417,8 +417,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B07 — Expose precision and quantization policy
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R28](GAP_ANALYSIS.md#r28), [R29](GAP_ANALYSIS.md#r29), [R36](GAP_ANALYSIS.md#r36). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** One RunConfig now carries Auto/BF16/FP16/FP32, Auto/SDPA/FlashAttention2/Eager, checkpointing modes, optional Liger, explicit RoPE, and NF4/FP4/int8 compute/storage/double-quantization policy. Backend validation and UI options consume the same capability descriptor; GPU runtime combinations remain unverified.
 - **Dependencies:** B01, B03.
 - **Relevant files:** `backend/app/domain.py`, `backend/app/backends/unsloth_backend.py`, `backend/app/models/capabilities.py`.
 - **Required work / backend and API impact:** Auto/bf16/fp16/fp32 and NF4/FP4/8bit compute/storage/nested controls gated by runtime.
@@ -429,8 +429,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B08 — Verify continued pretraining semantics
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R37](GAP_ANALYSIS.md#r37). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** Continued pretraining defaults to packed raw causal-LM rows, reuses the selected model/tokenizer, adds EOS, and rejects conversational/instruction canonical records before trainer construction. Held-out validation and a real tiny Transformers step remain open.
 - **Dependencies:** A12, B03.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `frontend/src/pages/DomainAdaptation.tsx`.
 - **Required work / backend and API impact:** Raw causal-LM path with explicit EOS/tokenization and packing parity; wire validation set.
@@ -441,8 +441,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B09 — Restore exact scratch checkpoint resume
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R38](GAP_ANALYSIS.md#r38). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** Scratch checkpoints now contain weights, optimizer, CPU/CUDA RNG, completed step, architecture, and tokenizer files. Resume validates architecture and preserves a warning-based legacy weights-only loader. Interrupted/uninterrupted equivalence remains unverified without Torch runtime evidence.
 - **Dependencies:** A03.
 - **Relevant files:** `backend/app/backends/scratch_backend.py`, `backend/app/train_entry/run.py`, `backend/app/api/runs.py`.
 - **Required work / backend and API impact:** Save/restore optimizer, RNG, step and data cursor; explicit resume endpoint.
@@ -453,8 +453,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B10 — Add scratch tokenizer and architecture options
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R20](GAP_ANALYSIS.md#r20), [R38](GAP_ANALYSIS.md#r38). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** Scratch training supports newly trained byte-level BPE or imported local `vocab.json`/`merges.txt`, random GPT initialization, internal train/validation split, checkpointing, and resume. The Pretraining Studio exposes tokenizer choice. HF AutoConfig initialization and real train/reload evidence remain open.
 - **Dependencies:** A11, B09.
 - **Relevant files:** `backend/app/backends/scratch_backend.py`, `backend/app/domain.py`, `frontend/src/pages/Pretrain.tsx`.
 - **Required work / backend and API impact:** Reuse/import/train tokenizer modes; optional HF from-config initialization behind capability.
@@ -477,8 +477,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B12 — Register final artifacts and lineage
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R58](GAP_ANALYSIS.md#r58), [R59](GAP_ANALYSIS.md#r59), [R75](GAP_ANALYSIS.md#r75), [R76](GAP_ANALYSIS.md#r76). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** Final checkpoint and artifact events idempotently create or update one `ModelArtifact` using existing tables. Metadata records backend, task, method, base model/revision, dataset, reference strategy, and backend metadata. Exact environment snapshots, parent artifact IDs, and generated model cards remain open. See [R58](GAP_ANALYSIS.md#r58), [R59](GAP_ANALYSIS.md#r59), [R75](GAP_ANALYSIS.md#r75), [R76](GAP_ANALYSIS.md#r76).
 - **Dependencies:** A03, B04.
 - **Relevant files:** `backend/app/core/runner.py`, `backend/app/db/models.py`, `backend/app/api/registry.py`, `backend/app/core/reproducibility.py`.
 - **Required work / backend and API impact:** Idempotent final artifact registration, exact revisions/environment and generated model card.
@@ -501,8 +501,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B14 — Add optional LLaMA-Factory discovery/config adapter
 
-- **Phase / state / risk:** B / Not started / medium.
-- **Current implementation:** [R03](GAP_ANALYSIS.md#r03), [R78](GAP_ANALYSIS.md#r78), [R82](GAP_ANALYSIS.md#r82), [R84](GAP_ANALYSIS.md#r84). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / medium.
+- **Current implementation:** `LlamaFactoryBackend` is always discoverable as optional, reports package/CLI/version state with a >=0.9 compatibility floor, translates validated RunConfig and canonical datasets, rejects semantics it cannot preserve, and leaves native training unchanged when absent. Installed-runtime matrix evidence remains open. See [R03](GAP_ANALYSIS.md#r03), [R78](GAP_ANALYSIS.md#r78), [R82](GAP_ANALYSIS.md#r82), [R84](GAP_ANALYSIS.md#r84).
 - **Dependencies:** B01, B03.
 - **Relevant files:** `backend/app/backends/base.py`, `backend/app/models/capabilities.py`, `backend/pyproject.toml`.
 - **Required work / backend and API impact:** Version-qualified optional registration and native config translation; install guidance.
@@ -513,8 +513,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## B15 — Bridge LLaMA-Factory worker lifecycle
 
-- **Phase / state / risk:** B / Not started / high.
-- **Current implementation:** [R03](GAP_ANALYSIS.md#r03), [R71](GAP_ANALYSIS.md#r71), [R82](GAP_ANALYSIS.md#r82). Read those code findings before editing.
+- **Phase / state / risk:** B / Partially complete / high.
+- **Current implementation:** The optional CLI runs inside the normal training worker and GPU lease, streams logs/metrics, emits checkpoints/artifacts, revalidates installation/config in the worker, terminates its subprocess tree, and reports nonzero exits through the normal failure path. An installed-runtime launch/cancel/failure test remains open. See [R03](GAP_ANALYSIS.md#r03), [R71](GAP_ANALYSIS.md#r71), [R82](GAP_ANALYSIS.md#r82).
 - **Dependencies:** B12, B14.
 - **Relevant files:** `backend/app/backends/base.py`, `backend/app/core/runner.py`, `backend/app/core/events.py`, `backend/tests`.
 - **Required work / backend and API impact:** Launch optional engine within supervised process tree; map metrics/checkpoints/final/cancel/errors.
@@ -561,11 +561,13 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C01 — Define alignment/reference config
 
-- **Phase / state / risk:** C / Not started / high.
-- **Current implementation:** [R04](GAP_ANALYSIS.md#r04), [R39](GAP_ANALYSIS.md#r39), [R40](GAP_ANALYSIS.md#r40), [R41](GAP_ANALYSIS.md#r41), [R42](GAP_ANALYSIS.md#r42), [R43](GAP_ANALYSIS.md#r43). Read those code findings before editing.
+Step 16 review: all six native objectives have local CPU acceptance on TRL 0.19.1; the complete runtime/GPU matrix is unverified. Phase C remains partial. Existing owners now enforce DPO-loss/reference capability gates, token-ID compatibility, content-bound alignment preparation, classification-head exclusions, pure SimPO semantics, and cancellation/resume safeguards. No database migration. Exact runtime versions/results are in STATUS.md. **Next: C01 durable policy/reference pinning, then C08 regression evaluation; Phase D remains paused.**
+
+- **Phase / state / risk:** C / Partially complete / high.
+- **Current implementation:** One RunConfig now validates DPO/IPO/ORPO/SimPO/KTO and base/separate/adapter-disabled/none references. Reference memory is included before launch; reference strategy is included in profiles and artifact lineage; the Alignment Studio uses the same schema. Immutable remote commit resolution remains open. See [R04](GAP_ANALYSIS.md#r04), [R39](GAP_ANALYSIS.md#r39), [R40](GAP_ANALYSIS.md#r40), [R41](GAP_ANALYSIS.md#r41), [R42](GAP_ANALYSIS.md#r42), [R43](GAP_ANALYSIS.md#r43).
 - **Dependencies:** A06, B01, B12.
 - **Relevant files:** `backend/app/domain.py`, `backend/app/models/capabilities.py`, `backend/app/integrations/estimator.py`.
-- **Required work / backend and API impact:** Objective-specific validation and base/separate/adapter-disabled reference strategies.
+- **Required work / backend and API impact:** Persist immutable effective policy/base/adapter/reference identities before launch and retain them on resume; preserve requested references for display. Reuse model_refs, RunConfig, and existing lineage owners.
 - **Database impact / migration requirement:** Config JSON references to artifacts and dataset versions. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
 - **Frontend impact:** Alignment Studio inside Training.
 - **Tests required:** Regression fixtures for this behavior; Invalid objective/data/reference combinations fail; reference memory included and lineage pinned. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
@@ -573,8 +575,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C02 — Execute DPO through shared trainer strategy
 
-- **Phase / state / risk:** C / Not started / high.
-- **Current implementation:** [R39](GAP_ANALYSIS.md#r39). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / high.
+- **Current implementation:** Shared `PreferenceTrainer` runs all four exposed DPO losses on TRL 0.19.1 CPU fixtures, with normalized rewards/logprobs/accuracy/margin and reloadable output. Adapter-disabled reference and optimizer-checkpoint resume pass. Additional runtime/GPU coverage remains unverified. See [R39](GAP_ANALYSIS.md#r39).
 - **Dependencies:** C01, B03.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/core/events.py`, `backend/tests`.
 - **Required work / backend and API impact:** TRL DPO beta/loss/smoothing and reference selection with installed-version checks.
@@ -585,8 +587,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C03 — Add IPO objective
 
-- **Phase / state / risk:** C / Not started / medium.
-- **Current implementation:** [R40](GAP_ANALYSIS.md#r40). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / medium.
+- **Current implementation:** IPO reuses DPO with `loss_type=ipo`; irrelevant loss/smoothing settings fail validation or are cleared from inactive UI payload fields. Tiny TRL 0.19.1 CPU train/save/reload passed; additional runtime/GPU coverage remains unverified. See [R40](GAP_ANALYSIS.md#r40).
 - **Dependencies:** C02.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/domain.py`.
 - **Required work / backend and API impact:** IPO objective strategy reuses preference pipeline.
@@ -597,8 +599,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C04 — Add ORPO objective
 
-- **Phase / state / risk:** C / Not started / high.
-- **Current implementation:** [R40](GAP_ANALYSIS.md#r40). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / high.
+- **Current implementation:** ORPO uses the shared lifecycle with reference-free configuration. Tiny TRL 0.19.1 CPU train/save/reload passed; additional runtime/GPU coverage remains unverified. See [R40](GAP_ANALYSIS.md#r40).
 - **Dependencies:** C02.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/domain.py`.
 - **Required work / backend and API impact:** ORPO trainer adapter sharing canonical inputs/events.
@@ -609,8 +611,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C05 — Add SimPO objective
 
-- **Phase / state / risk:** C / Not started / high.
-- **Current implementation:** [R40](GAP_ANALYSIS.md#r40). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / high.
+- **Current implementation:** Reference-free SimPO uses CPO with `loss_type=simpo`, explicit gamma and `cpo_alpha=0`. Installed loss math and tiny TRL 0.19.1 CPU train/save/reload passed; additional runtime/GPU coverage remains unverified. See [R40](GAP_ANALYSIS.md#r40).
 - **Dependencies:** C02.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/domain.py`.
 - **Required work / backend and API impact:** Version-gated SimPO implementation without separate engine.
@@ -621,8 +623,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C06 — Execute KTO and balance diagnostics
 
-- **Phase / state / risk:** C / Not started / high.
-- **Current implementation:** [R41](GAP_ANALYSIS.md#r41). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / high.
+- **Current implementation:** KTO canonical labels, both-class validation/imbalance warning, class weights, rendering, and shared lifecycle pass a tiny TRL 0.19.1 CPU artifact job. Worker preparation revalidates actual data. Additional runtime/GPU coverage remains unverified. See [R41](GAP_ANALYSIS.md#r41).
 - **Dependencies:** C01.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/datasets/quality.py`.
 - **Required work / backend and API impact:** KTO trainer strategy with desirable/undesirable weighting.
@@ -633,20 +635,20 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## C07 — Train and evaluate reward models
 
-- **Phase / state / risk:** C / Not started / high.
-- **Current implementation:** [R42](GAP_ANALYSIS.md#r42). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / high.
+- **Current implementation:** Full/LoRA/DoRA reward train/save/reload and repeatable registered adapter scoring pass on TRL 0.19.1 CPU fixtures. Classification heads are excluded from LoRA wrappers, saved in full, and retained through full continuation. Typed reward artifacts retain scalar evaluation and generation/serving exclusions. QLoRA/additional runtime coverage remains unverified. See [R42](GAP_ANALYSIS.md#r42).
 - **Dependencies:** C01.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/train_entry/model_runtime.py`, `backend/app/train_entry/eval_run.py`.
 - **Required work / backend and API impact:** Sequence-score loader/trainer and pairwise evaluation separate from causal generation.
-- **Database impact / migration requirement:** Reward/reference artifact kinds use B12 migration. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No migration was required: the existing open-string artifact kind and metadata JSON retain backward compatibility while the API normalizes stable categories. If durable parent relationships are added later, use a new frozen Alembic revision and verify fresh and legacy upgrade.
 - **Frontend impact:** Reward model labels and evaluation.
 - **Tests required:** Regression fixtures for this behavior; Tiny reward job saves/reloads numeric scores and lineage; generation disallowed for reward artifacts. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Tiny reward job saves/reloads numeric scores and lineage; generation disallowed for reward artifacts. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
 
 ## C08 — Alignment telemetry and regression gate
 
-- **Phase / state / risk:** C / Not started / medium.
-- **Current implementation:** [R49](GAP_ANALYSIS.md#r49), [R81](GAP_ANALYSIS.md#r81), [R86](GAP_ANALYSIS.md#r86). Read those code findings before editing.
+- **Phase / state / risk:** C / Partially complete / medium.
+- **Current implementation:** Shared callback/replay contracts and installed TRL 0.19.1 objective telemetry pass; DPO reward-margin arithmetic and SimPO loss math are checked. Cancellation/process-tree and optimizer-resume fixtures pass. Base-versus-trained regression, exact interrupted-resume equivalence, and additional runtime-version coverage remain open. See [R49](GAP_ANALYSIS.md#r49), [R81](GAP_ANALYSIS.md#r81), [R86](GAP_ANALYSIS.md#r86).
 - **Dependencies:** C02, C03, C04, C05, C06, C07.
 - **Relevant files:** `frontend/src/components/RunMonitor.tsx`, `backend/app/core/events.py`, `backend/tests`, `docs`.
 - **Required work / backend and API impact:** Normalize chosen/rejected rewards, margins, accuracy, logprob/KL by objective.
@@ -657,8 +659,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## D01 — Version-gate advanced PEFT strategies
 
-- **Phase / state / risk:** D / Not started / high.
-- **Current implementation:** [R26](GAP_ANALYSIS.md#r26). Read those code findings before editing.
+- **Phase / state / risk:** D / Partially complete / high.
+- **Current implementation:** `OptimizationCapability` is returned in every backend capability snapshot. Native Transformers/PEFT enables rsLoRA, PiSSA, and LoRA+ at PEFT >=0.11; an offline PEFT 0.15.2 tiny CPU forward/backward/optimizer fixture covers PiSSA plus LoRA+. LoftQ, EVA, OFT, and QOFT are explicitly unavailable pending their own lifecycle/runtime evidence. See [R26](GAP_ANALYSIS.md#r26).
 - **Dependencies:** B05, B07.
 - **Relevant files:** `backend/app/domain.py`, `backend/app/backends/unsloth_backend.py`, `backend/app/models/capabilities.py`.
 - **Required work / backend and API impact:** rsLoRA, LoRA+, PiSSA, LoftQ, EVA strategy descriptors; enable each only after its fixture/runtime test.
@@ -669,8 +671,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## D02 — Add optimizer strategy registry
 
-- **Phase / state / risk:** D / Not started / high.
-- **Current implementation:** [R30](GAP_ANALYSIS.md#r30). Read those code findings before editing.
+- **Phase / state / risk:** D / Partially complete / high.
+- **Current implementation:** The import-light registry owns schema, dependency/version detection, validation, progressive disclosure, and estimator hooks for GaLore, APOLLO, BAdam, Adam-mini, and Muon. All external optimizer descriptors remain unavailable until their package-specific executor passes finite-gradient, checkpoint/resume, and cancellation evidence. See [R30](GAP_ANALYSIS.md#r30).
 - **Dependencies:** B01.
 - **Relevant files:** `backend/app/domain.py`, `backend/app/backends/unsloth_backend.py`, `backend/app/integrations/estimator.py`.
 - **Required work / backend and API impact:** Schema/validation/estimation hooks; first adapter GaLore, other methods remain gated.
@@ -705,8 +707,8 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## D05 — Add Liger and NEFTune options
 
-- **Phase / state / risk:** D / Not started / high.
-- **Current implementation:** [R32](GAP_ANALYSIS.md#r32), [R35](GAP_ANALYSIS.md#r35). Read those code findings before editing.
+- **Phase / state / risk:** D / Partially complete / high.
+- **Current implementation:** NEFTune is a typed native RunConfig option and is supplied to SFT/alignment only after the installed config signature accepts it. FlashAttention and Liger are registry descriptors with package/runtime gates; their packages were absent in the recorded environment. See [R32](GAP_ANALYSIS.md#r32), [R35](GAP_ANALYSIS.md#r35).
 - **Dependencies:** D04.
 - **Relevant files:** `backend/app/backends/unsloth_backend.py`, `backend/app/domain.py`.
 - **Required work / backend and API impact:** Optional kernel/noise strategies with installed-runtime gates.
@@ -789,92 +791,99 @@ No task is treated as fully complete merely because its interface was establishe
 
 ## E01 — Persist deployment identity and provider capabilities
 
-- **Phase / state / risk:** E / Provider capability foundation implemented; persistence not started / high.
-- **Current implementation:** Existing Transformers/vLLM/Ollama providers now expose one typed capability contract while retaining legacy status arrays. Durable deployment identity and reconciliation remain E01. See [R59](GAP_ANALYSIS.md#r59), [R64](GAP_ANALYSIS.md#r64), [R75](GAP_ANALYSIS.md#r75).
+- **Phase / state / risk:** E / Capabilities implemented; persistence pending / high.
+- **Current implementation:** Typed provider feature/version schemas implemented. Native IDs are stable requested references. Deployment restart identity/reconciliation remains open.
 - **Dependencies:** B12.
 - **Relevant files:** `backend/app/serving/providers.py`, `backend/app/core/deployment.py`, `backend/app/db/models.py`, `frontend/src/pages/Serving.tsx`.
 - **Required work / backend and API impact:** Unify lifecycle/generate/health capability schema; retain external management semantics.
-- **Database impact / migration requirement:** Add Deployment/config/status/artifact FK/index migration. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Provider-driven controls.
 - **Tests required:** Regression fixtures for this behavior; Restart reconciles stale deployment records without killing unrelated processes; legacy serving remains usable. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Restart reconciles stale deployment records without killing unrelated processes; legacy serving remains usable. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E02 — Consolidate vLLM integrations and controls
 
-- **Phase / state / risk:** E / Not started / high.
-- **Current implementation:** [R66](GAP_ANALYSIS.md#r66), [R64](GAP_ANALYSIS.md#r64). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / high.
+- **Current implementation:** Managed vLLM shares the existing warm manager; external service mode retained. Installed CLI flags gate generic controls. CUDA count/local context/quantization checks added. Model-specific LoRA/quantization profiles and draft-model speculative support remain gated.
 - **Dependencies:** E01.
 - **Relevant files:** `backend/app/integrations/vllm_serve.py`, `backend/app/core/eval_manager.py`, `backend/app/serving/providers.py`, `docker-compose.yml`.
 - **Required work / backend and API impact:** Shared adapter for managed/external modes; version-gate length/TP/LoRA/prefix/quant/eager/speculation.
-- **Database impact / migration requirement:** Migrate legacy engine settings to provider config with defaults. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Only compatible controls.
 - **Tests required:** Regression fixtures for this behavior; Legacy Playground and Compose mode work without duplicate GPU owners or port collision. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Legacy Playground and Compose mode work without duplicate GPU owners or port collision. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E03 — Add optional SGLang provider
 
-- **Phase / state / risk:** E / Not started / high.
-- **Current implementation:** [R65](GAP_ANALYSIS.md#r65). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / high.
+- **Current implementation:** Optional SGLang detection/version, external URL and managed lifecycle/GPU ownership implemented through the shared engine supervisor; installed/unavailable fixtures pass. Real CUDA execution unverified.
 - **Dependencies:** E01.
 - **Relevant files:** `backend/app/serving/providers.py`, `backend/app/core/deployment.py`, `backend/app/config.py`.
 - **Required work / backend and API impact:** Dependency detection, isolated lifecycle, health/cancel and normalized generation.
-- **Database impact / migration requirement:** Reuse Deployment. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Optional provider guidance.
 - **Tests required:** Regression fixtures for this behavior; Missing package safe; configured tiny server start/test/stop/restart; lease released. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Missing package safe; configured tiny server start/test/stop/restart; lease released. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E04 — Normalize OpenAI serving and reward scoring
 
-- **Phase / state / risk:** E / Not started / high.
-- **Current implementation:** [R67](GAP_ANALYSIS.md#r67), [R68](GAP_ANALYSIS.md#r68). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / high.
+- **Current implementation:** Provider-prefixed root OpenAI discovery/chat/text proxy implemented; native text streaming and finite scalar reward scoring added. Tool/reasoning parsers, metrics and batching remain unverified/gated.
 - **Dependencies:** A09, C07, E01.
 - **Relevant files:** `backend/app/train_entry/serve.py`, `backend/app/train_entry/model_runtime.py`, `backend/app/serving/providers.py`.
 - **Required work / backend and API impact:** Chat/completion/stream contracts plus separate score endpoint; explicit tool/reasoning support.
-- **Database impact / migration requirement:** No extra tables. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Endpoint examples and score test view.
 - **Tests required:** Regression fixtures for this behavior; OpenAI response/SSE fixtures pass; reward scores numeric; unsupported inputs rejected. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** OpenAI response/SSE fixtures pass; reward scores numeric; unsupported inputs rejected. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E05 — Add immutable export job contract and merge checks
 
-- **Phase / state / risk:** E / Not started / high.
-- **Current implementation:** [R60](GAP_ANALYSIS.md#r60), [R61](GAP_ANALYSIS.md#r61), [R75](GAP_ANALYSIS.md#r75). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / high.
+- **Current implementation:** Unified artifact-backed worker jobs implemented for adapter/full/merged/GGUF/Ollama/Hub with logs/progress/failure/lineage, bounded concurrency, process-tree cancellation and PID/start-time recovery. Remote base commit, local base fingerprints, architecture, vocab/special-token and low-bit checks added. Tiny CPU merge/reload equivalence passed; real GGUF acceptance pending.
 - **Dependencies:** B12, E01.
 - **Relevant files:** `backend/app/api/registry.py`, `backend/app/train_entry/merge.py`, `backend/app/integrations/gguf.py`, `backend/app/db/models.py`.
 - **Required work / backend and API impact:** Shared bounded lifecycle for adapter/HF/GGUF/Hub export; validate base revision/vocab/quant before merge.
-- **Database impact / migration requirement:** Add ExportJob/artifact lineage/status migration. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Export logs/progress/retry.
 - **Tests required:** Regression fixtures for this behavior; Wrong base/tokenizer/low-bit merge rejected; cancellation stops converter tree; output artifact immutable. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Wrong base/tokenizer/low-bit merge rejected; cancellation stops converter tree; output artifact immutable. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E06 — Add quantization/calibration capabilities
 
-- **Phase / state / risk:** E / Not started / high.
-- **Current implementation:** [R29](GAP_ANALYSIS.md#r29), [R62](GAP_ANALYSIS.md#r62). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / high.
+- **Current implementation:** Operation-specific six-method optional registry and validated calibration metadata implemented. Calibration identities/content/sample counts checked when supplied. No unverified calibrated quantizer/export path enabled; real GGUF conversion/reload remains pending.
 - **Dependencies:** B07, E05.
 - **Relevant files:** `backend/app/models/capabilities.py`, `backend/app/api/registry.py`, `backend/app/integrations`.
 - **Required work / backend and API impact:** Separate load/train/infer/export/merge support for BNB/GPTQ/AWQ/HQQ/EETQ/AQLM; implement only tested paths.
-- **Database impact / migration requirement:** Calibration dataset version/seed in ExportJob JSON. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Method-specific calibration controls.
 - **Tests required:** Regression fixtures for this behavior; Unsupported operations disabled; calibration fingerprint persisted; enabled exporter reload tested. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Unsupported operations disabled; calibration fingerprint persisted; enabled exporter reload tested. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E07 — Produce reproducible Ollama packaging
 
-- **Phase / state / risk:** E / Not started / medium.
-- **Current implementation:** [R63](GAP_ANALYSIS.md#r63). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / medium.
+- **Current implementation:** Offline GGUF/relative-FROM Modelfile package implemented; explicit CLI import remains separate. Automatic template/stops/default translation and real Ollama acceptance pending.
 - **Dependencies:** A08, E05.
 - **Relevant files:** `backend/app/serving/providers.py`, `backend/app/api/serving.py`, `frontend/src/pages/Serving.tsx`.
 - **Required work / backend and API impact:** Export-only Modelfile with template/stops/defaults; optional local import.
-- **Database impact / migration requirement:** Export job metadata. When adding schema, use a new frozen Alembic revision; verify fresh and legacy upgrade without modifying prior revisions.
+- **Database impact / migration requirement:** No schema change in Steps 18–19. Export jobs use existing ModelArtifact JSON; calibration uses existing DatasetVersion identities. Deployment persistence, if later required, needs a new frozen migration with fresh/legacy tests.
 - **Frontend impact:** Export and import separate actions.
 - **Tests required:** Regression fixtures for this behavior; Rendered Modelfile matches source policy; offline export works; installed Ollama smoke passes. Use CPU/mocks for normal tests and explicitly marked optional runtime tests for ML/provider execution. Run touched backend lint/tests and frontend tests/build/lint when UI contracts change.
 - **Acceptance criteria:** Rendered Modelfile matches source policy; offline export works; installed Ollama smoke passes. Existing supported behavior and stored references remain valid; update STATUS and affected product docs with evidence.
+- **Steps 18–19 evidence:** See PHASE_E.md and STATUS.md. Shared owners: `core/export_jobs.py`, `export_contracts.py`, `train_entry/export.py`, `models/quantization_registry.py`, `serving/runtime_options.py`, `api/openai_gateway.py`; existing provider/runtime/registry/engine and frontend owners extended.
 
 ## E08 — Add serving benchmarks and regression suites
 
-- **Phase / state / risk:** E / Not started / high.
-- **Current implementation:** [R69](GAP_ANALYSIS.md#r69), [R86](GAP_ANALYSIS.md#r86), [R90](GAP_ANALYSIS.md#r90). Read those code findings before editing.
+- **Phase / state / risk:** E / Partially implemented / high.
+- **Current implementation:** `ServingBenchmark` records bind an optional artifact, active provider/model/endpoint, request profile and hardware snapshots. Streamed fixtures cover TTFT, inter-token latency, percentiles, errors, concurrency and VRAM. vLLM KV cache is read only when its Prometheus metric is exposed; real provider acceptance remains open.
 - **Dependencies:** E02, E03, E04, E06, E07.
 - **Relevant files:** `backend/app/api/serving.py`, `backend/app/serving/providers.py`, `frontend/src/pages/Serving.tsx`, `backend/tests`, `docs`.
 - **Required work / backend and API impact:** Bounded concurrent TTFT/ITL/throughput/percentile/error/VRAM measurement.

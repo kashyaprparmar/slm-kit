@@ -319,8 +319,9 @@ function ArtifactRow({ art, caps, deployment, onChanged, onDeploymentChanged }: 
   onDeploymentChanged: () => void;
 }) {
   const isGguf = art.kind === "gguf";
+  const isReward = art.model_category === "reward_model" || art.kind === "reward_model";
   const quantizing = art.status === "quantizing";
-  const pending = quantizing || art.status === "merging";
+  const pending = quantizing || art.status === "merging" || art.status === "exporting";
   const [showLogs, setShowLogs] = useState(quantizing);
   const importOllama = useMutation({
     mutationFn: (model: string) => api.importOllama(art.id, model),
@@ -346,6 +347,8 @@ function ArtifactRow({ art, caps, deployment, onChanged, onDeploymentChanged }: 
           <Badge variant="danger">failed</Badge>
         ) : isGguf ? (
           <Badge variant="success">GGUF</Badge>
+        ) : isReward ? (
+          <Badge variant="default">reward model</Badge>
         ) : art.published ? (
           <Badge variant="default">published</Badge>
         ) : (
@@ -356,6 +359,8 @@ function ArtifactRow({ art, caps, deployment, onChanged, onDeploymentChanged }: 
         {art.base_model || "—"} · {relativeTime(art.created_at)}
       </div>
       {art.error && <div className="mt-1.5 rounded border border-danger/40 bg-danger/10 px-2 py-1 text-[11px] text-danger">{art.error}</div>}
+      {!!art.meta?.export_job && <ExportJobDetails artifactId={art.id} pending={pending} onChanged={onChanged} />}
+      {art.status === "ready" && art.local_path && <ExportControl art={art} onChanged={onChanged} />}
       {art.hf_repo && (
         <a href={art.hf_repo} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[11px] text-primary hover:underline">
           <ExternalLink className="size-3" /> {art.hf_repo.replace("https://huggingface.co/", "")}
@@ -371,16 +376,14 @@ function ArtifactRow({ art, caps, deployment, onChanged, onDeploymentChanged }: 
           }}>{importOllama.isPending ? "Importing…" : "Import to Ollama"}</Button>
         </div>
       )}
-      {!isGguf && art.local_path && art.status === "ready" && (
+      {!isGguf && art.kind !== "ollama" && art.local_path && art.status === "ready" && (
         <div className="mt-2 flex flex-wrap gap-2">
-          <Button asChild size="sm" variant="ghost"><Link to={`/eval?model=${encodeURIComponent(art.local_path)}`}>Test</Link></Button>
           <Button asChild size="sm" variant="ghost"><Link to={`/eval?tab=evaluate&model=${encodeURIComponent(art.local_path)}`}>Evaluate</Link></Button>
-          <Button asChild size="sm" variant="ghost"><Link to={`/finetune?model=${encodeURIComponent(art.local_path)}`}>Fine-tune</Link></Button>
-          <DeployControl modelRef={art.local_path} deployment={deployment} onChanged={onDeploymentChanged} />
-          {art.kind === "merged" ? <QuantizeArtifactControl artifactId={art.id} caps={caps} onStarted={onChanged} /> : null}
+          {!isReward && <><Button asChild size="sm" variant="ghost"><Link to={`/eval?model=${encodeURIComponent(art.local_path)}`}>Test</Link></Button><Button asChild size="sm" variant="ghost"><Link to={`/finetune?model=${encodeURIComponent(art.local_path)}`}>Fine-tune</Link></Button><DeployControl modelRef={art.local_path} deployment={deployment} onChanged={onDeploymentChanged} /></>}
+          {art.model_category === "merged_model" || art.kind === "merged" ? <QuantizeArtifactControl artifactId={art.id} caps={caps} onStarted={onChanged} /> : null}
         </div>
       )}
-      {isGguf && (
+      {isGguf && !art.meta?.export_job && (
         <>
           <button
             onClick={() => setShowLogs((s) => !s)}
@@ -396,6 +399,35 @@ function ArtifactRow({ art, caps, deployment, onChanged, onDeploymentChanged }: 
       }}><Trash2 /> Remove artifact</Button>}
     </div>
   );
+}
+
+function ExportControl({ art, onChanged }: { art: ModelArtifact; onChanged: () => void }) {
+  const [target, setTarget] = useState("hub");
+  const [repo, setRepo] = useState("");
+  const [privateRepo, setPrivateRepo] = useState(true);
+  const [baseRevision, setBaseRevision] = useState("");
+  const exportJob = useMutation({ mutationFn: () => api.exportArtifact({ artifact_id: art.id, target, ...(target === "hub" ? { repo_id: repo, private: privateRepo } : {}), ...(target === "merged" && baseRevision.trim() ? { base_revision: baseRevision.trim() } : {}) }),
+    onSuccess: () => { toast.success("Export job started"); onChanged(); }, onError: (error: Error) => toast.error(error.message) });
+  return <details className="mt-2"><summary className="cursor-pointer text-xs">Export artifact</summary><div className="mt-2 space-y-2">
+    <Select aria-label="Export format" value={target} onChange={event => setTarget(event.target.value)}>
+      {Object.entries(art.export_capabilities ?? {}).filter(([key]) => key !== "quantized").map(([key, capability]) => <option key={key} value={key} disabled={capability.state !== "supported" && capability.state !== "experimental"}>{key === "hub" ? "Publish to Hugging Face Hub" : key} {capability.state === "unsupported" ? "· unavailable" : ""}</option>)}
+    </Select>
+    {target === "hub" && <><Input aria-label="Export repository" placeholder="owner/repository" value={repo} onChange={event => setRepo(event.target.value)} /><label className="flex gap-2 text-xs"><input type="checkbox" checked={privateRepo} onChange={event => setPrivateRepo(event.target.checked)} />Private repository</label><p className="text-xs text-muted-foreground">Starting this job publishes to the repository shown above.</p></>}
+    {target === "merged" && <Input aria-label="Merge base revision" placeholder="Original base commit (if not already recorded)" value={baseRevision} onChange={event => setBaseRevision(event.target.value)} />}
+    <p className="text-xs text-muted-foreground">{art.export_capabilities?.[target]?.reason}</p>
+    <Button size="sm" disabled={exportJob.isPending || art.export_capabilities?.[target]?.state !== "supported" || (target === "hub" && !repo.trim())} onClick={() => exportJob.mutate()}>Start export</Button>
+    {exportJob.error && <p role="alert" className="text-xs text-danger">{exportJob.error.message}</p>}
+  </div></details>;
+}
+
+function ExportJobDetails({ artifactId, pending, onChanged }: { artifactId: number; pending: boolean; onChanged: () => void }) {
+  const status = useQuery({ queryKey: ["export-job", artifactId], queryFn: () => api.exportStatus(artifactId), refetchInterval: pending ? 1500 : false });
+  const cancel = useMutation({ mutationFn: () => api.cancelExport(artifactId), onSuccess: () => { onChanged(); status.refetch(); }, onError: (error: Error) => toast.error(error.message) });
+  const job = status.data?.artifact.meta?.export_job as { progress?: number; message?: string } | undefined;
+  return <div className="mt-2 space-y-2"><p className="text-xs">{job?.progress ?? 0}% · {job?.message ?? "Export job"}</p>
+    {pending && <Button size="sm" variant="outline" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel export</Button>}
+    <details><summary className="cursor-pointer text-xs">Job logs</summary><LogPanel lines={status.data?.logs ?? []} live={pending} title="Export job" /></details>
+  </div>;
 }
 
 function QuantizeArtifactControl({ artifactId, caps, onStarted }: { artifactId: number; caps?: { gguf_available: boolean; quant_types: string[] }; onStarted: () => void }) {

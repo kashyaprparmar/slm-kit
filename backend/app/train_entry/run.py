@@ -8,6 +8,7 @@ reported as a final ``status: failed`` event before a non-zero exit.
 
 from __future__ import annotations
 
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -21,12 +22,26 @@ from app.domain import RunConfig
 # (tokenizer samples, dataset content, model output) can contain arbitrary
 # Unicode; Windows' default console encoding (cp1252) can't represent it and
 # would crash sys.stdout.write with a UnicodeEncodeError.
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _emit(event) -> None:
     sys.stdout.write(dump_event(event) + "\n")
     sys.stdout.flush()
+
+
+def _alignment_checkpoint_complete(path: Path) -> bool:
+    """Skip interrupted HF saves instead of resuming corrupt latest directories."""
+    try:
+        state = json.loads((path / "trainer_state.json").read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or not isinstance(state.get("global_step"), int):
+            return False
+        required = [path / "optimizer.pt", path / "scheduler.pt"]
+        weights = [*path.glob("*.safetensors"), *path.glob("pytorch_model*.bin"), *path.glob("adapter_model*.bin")]
+        return bool(weights) and all(item.is_file() and item.stat().st_size > 0 for item in [*required, *weights])
+    except (OSError, ValueError):
+        return False
 
 
 def main(run_id: int) -> int:
@@ -51,6 +66,12 @@ def main(run_id: int) -> int:
 
     resume_from = None
     existing = sorted(checkpoint_dir.glob("checkpoint-*"), key=_step_of)
+    if cfg.task.value == "alignment" and cfg.backend == "transformers":
+        complete = [path for path in existing if _alignment_checkpoint_complete(path)]
+        for path in existing:
+            if path not in complete:
+                _emit(LogEvent(level="warning", message=f"Skipping incomplete alignment checkpoint {path.name}."))
+        existing = complete
     if existing:
         resume_from = existing[-1]
         _emit(LogEvent(message=f"Resuming from {resume_from.name}"))

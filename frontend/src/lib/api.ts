@@ -67,7 +67,17 @@ export class ApiError extends Error {
   }
 }
 
+export interface EngineStatus { installed: boolean; available: boolean; active: boolean; managed: boolean; endpoint: string; guidance: string; models: { id: string }[]; error?: string; version?: string }
+
 export const api = {
+  exportArtifact: (body: { artifact_id: number; target: string; repo_id?: string; private?: boolean; base_revision?: string; ollama?: { chat_template?: string; stop_tokens?: string[]; generation_defaults?: Record<string, number> } }) => req<{ artifact_id: number; status: string }>("/api/registry/exports", { method: "POST", body: JSON.stringify(body) }),
+  exportStatus: (id: number) => req<{ artifact: ModelArtifact; logs: LogLine[] }>(`/api/registry/exports/${id}`),
+  cancelExport: (id: number) => req<{ cancelled: boolean }>(`/api/registry/exports/${id}/cancel`, { method: "POST" }),
+  engineOptions: (provider: string) => req<{ properties: Record<string, { title: string; anyOf?: { type: string }[] }>; installed_version?: string }>(`/api/serving/${provider}/options`),
+  startProvider: (provider: string, model: string, options: Record<string, unknown>) => req<unknown>(`/api/serving/${provider}/start`, { method: "POST", body: JSON.stringify({ model, options }) }),
+  stopProvider: (provider: string) => req<unknown>(`/api/serving/${provider}/stop`, { method: "POST" }),
+  scoreModel: (model: string, input: string[]) => req<{ data: { score: number }[] }>("/v1/scores", { method: "POST", body: JSON.stringify({ model, input }) }),
+  servedModels: () => req<{ data: { id: string }[] }>("/v1/models"),
   listProjects: () => req<Project[]>("/api/projects"),
   createProject: (body: { name: string; description?: string; state?: Record<string, unknown> }) =>
     req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
@@ -80,11 +90,14 @@ export const api = {
   diagnostics: () => req<{ checks: { name: string; status: string; detail: string; guidance: string }[] }>("/api/system/diagnostics"),
   services: () => req<{ api: { status: string }; database: { status: string; engine: string; error?: string }; training_worker: { status: string; run_id?: number | null }; gpu_resource: { kind: string; id?: string | number }; providers: Record<string, { active?: boolean; running?: boolean; available?: boolean; guidance?: string; error?: string }> }>("/api/system/services"),
   activity: () => req<{ events: { id: string; ts: number; message: string; level: string; duration_ms?: number; correlation_id?: string }[] }>("/api/system/activity"),
-  servingProviders: () => req<{ transformers: DeploymentStatus; ollama: { installed: boolean; running: boolean; managed_model?: string; endpoint: string; guidance: string; models: { name: string }[]; loaded: { name: string }[] }; vllm: { available: boolean; active: boolean; managed: false; endpoint: string; guidance: string; models: { id: string }[]; error?: string } }>("/api/serving/providers"),
+  servingProviders: () => req<{ transformers: DeploymentStatus; ollama: { installed: boolean; running: boolean; managed_model?: string; endpoint: string; guidance: string; models: { name: string }[]; loaded: { name: string }[] }; vllm: EngineStatus; sglang: EngineStatus }>("/api/serving/providers"),
   startOllama: (model: string) => req<unknown>("/api/serving/ollama/start", { method: "POST", body: JSON.stringify({ model }) }),
   stopOllama: () => req<{ stopped: boolean }>("/api/serving/ollama/stop", { method: "POST" }),
   importOllama: (artifact_id: number, model: string) => req<{ model: string; status: string }>("/api/serving/ollama/import", { method: "POST", body: JSON.stringify({ artifact_id, model }) }),
+  importOllamaPackage: (artifact_id: number, model: string) => req<{ model: string; status: string }>("/api/serving/ollama/import-package", { method: "POST", body: JSON.stringify({ artifact_id, model }) }),
   testServing: (body: { provider: string; prompt: string; max_tokens: number }) => req<{ output: string }>("/api/serving/test", { method: "POST", body: JSON.stringify(body) }),
+  startServingBenchmark: (body: { provider: string; artifact_id?: number; prompt: string; max_tokens: number; requests: number; concurrency: number; warmup_requests: number }) => req<{ benchmark_id: number; status: string }>("/api/serving/benchmarks", { method: "POST", body: JSON.stringify(body) }),
+  servingBenchmark: (id: number) => req<{ id: number; status: string; results?: Record<string, unknown>; error?: string }>(`/api/serving/benchmarks/${id}`),
   cloneRun: (id: number) => req<{ config: Record<string, unknown> }>(`/api/runs/${id}/clone`, { method: "POST" }),
   // system
   health: () => req<{ status: string; version: string }>("/api/health"),

@@ -14,13 +14,20 @@ def main(config_path: str) -> int:
     output = Path(cfg["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     print(f"Loading adapter {cfg['model_ref']}", flush=True)
-    runtime = load_runtime(cfg["model_ref"])
+    runtime = load_runtime(cfg["model_ref"], for_merge=True, base_revision=cfg.get("base_revision"))
     if runtime.spec.kind != "adapter" or not hasattr(runtime.model, "merge_and_unload"):
         raise ValueError("This model is not a mergeable PEFT adapter.")
+    if any(getattr(runtime.model, key, False) for key in ("is_loaded_in_4bit", "is_loaded_in_8bit")) or getattr(runtime.model.config, "quantization_config", None):
+        raise ValueError("Merging into low-bit quantized weights is unsafe and is not supported.")
     print("Merging adapter weights into the base model", flush=True)
-    merged = runtime.model.merge_and_unload(progressbar=True)
+    merged = runtime.model.merge_and_unload(progressbar=True, safe_merge=True)
     merged.save_pretrained(str(output), safe_serialization=True)
     runtime.tokenizer.save_pretrained(str(output))
+    lineage = {**runtime.load_metadata, "base_model": runtime.spec.base_model,
+               "base_revision": runtime.load_metadata.get("base_revision") or getattr(runtime.model.config, "_commit_hash", None),
+               "architectures": getattr(runtime.model.config, "architectures", None),
+               "tokenizer_size": len(runtime.tokenizer), "safe_merge": True, "quantized_base": False}
+    (output / "merge-lineage.json").write_text(json.dumps(lineage, indent=2), encoding="utf-8")
     print(f"Merged model saved to {output}", flush=True)
     return 0
 

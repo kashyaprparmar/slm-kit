@@ -41,8 +41,8 @@ def test_dataset_registry_implements_shared_adapter_contract():
     adapter = get_dataset_adapter("prompt_response")
     record = adapter.canonicalize({"prompt": "Hello", "response": "Hi"})
     assert record.messages[-1].content == "Hi"
-    assert adapter.validate({"prompt": "Hello", "response": "Hi"}) == []
-    assert adapter.preview({"prompt": "Hello", "response": "Hi"})["messages"][-1]["content"] == "Hi"
+    assert adapter.validate({"prompt": "Hello", "response": "Hi"}).valid
+    assert adapter.preview({"prompt": "Hello", "response": "Hi"}).storage["messages"][-1]["content"] == "Hi"
     assert adapter.capabilities().training_stages["supervised_fine_tuning"].allowed
 
 

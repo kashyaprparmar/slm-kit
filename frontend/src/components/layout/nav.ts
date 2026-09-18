@@ -10,6 +10,7 @@ import {
   Server,
   Settings,
   FolderKanban,
+  Scale,
   type LucideIcon,
 } from "lucide-react";
 
@@ -27,6 +28,7 @@ export const NAV: NavItem[] = [
   { to: "/pretrain", label: "Pretraining", icon: Boxes, group: "Studios" },
   { to: "/domain", label: "Domain Adaptation", icon: Layers, group: "Studios" },
   { to: "/finetune", label: "Fine-Tuning", icon: SlidersHorizontal, group: "Studios" },
+  { to: "/alignment", label: "Preference Alignment", icon: Scale, group: "Studios" },
   { to: "/eval", label: "Testing & Eval Lab", icon: FlaskConical, group: "Analysis" },
   { to: "/registry", label: "Model Registry", icon: Library, group: "Analysis" },
   { to: "/runs", label: "Run History", icon: History, group: "Analysis" },

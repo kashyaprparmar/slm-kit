@@ -10,6 +10,7 @@ const Datasets = lazy(() => import("@/pages/Datasets"));
 const Finetune = lazy(() => import("@/pages/Finetune"));
 const Pretrain = lazy(() => import("@/pages/Pretrain"));
 const DomainAdaptation = lazy(() => import("@/pages/DomainAdaptation"));
+const Alignment = lazy(() => import("@/pages/Alignment"));
 const RunHistory = lazy(() => import("@/pages/RunHistory"));
 const Registry = lazy(() => import("@/pages/Registry"));
 const EvalLab = lazy(() => import("@/pages/EvalLab"));
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="/pretrain" element={<Pretrain />} />
           <Route path="/domain" element={<DomainAdaptation />} />
           <Route path="/finetune" element={<Finetune />} />
+          <Route path="/alignment" element={<Alignment />} />
           <Route path="/eval" element={<EvalLab />} />
           <Route path="/registry" element={<Registry />} />
           <Route path="/runs" element={<RunHistory />} />

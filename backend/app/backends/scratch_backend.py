@@ -13,6 +13,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 from app.backends.base import RunContext, TrainingBackendCapabilities
 from app.capabilities import (
@@ -28,6 +29,7 @@ from app.core.events import (
     CheckpointEvent,
     LogEvent,
     MetricEvent,
+    ProfileEvent,
     SampleEvent,
     TrainingEvent,
 )
@@ -74,7 +76,7 @@ class ScratchBackend:
             },
             methods={method.value: (supported if method == Method.FULL else unsupported) for method in Method},
             tokenizer=TokenizerCapabilities(
-                modes={"reuse": unsupported, "extend": unsupported, "train": supported},
+                modes={"reuse": unsupported, "extend": unsupported, "train": supported, "import": supported},
                 loss_policies={
                     "full_sequence": supported,
                     "completion_only": unsupported,
@@ -114,6 +116,12 @@ class ScratchBackend:
         arch = cfg.arch or ScratchArch()
         if arch.n_embd % arch.n_heads != 0:
             report.error("n_embd must be divisible by n_heads.")
+        if cfg.tokenizer.mode == "extend":
+            report.error("From-scratch pretraining supports a newly trained or imported tokenizer, not extend mode.")
+        if cfg.tokenizer.mode == "reuse":
+            report.info("Legacy scratch tokenizer mode 'reuse' is interpreted as training a new tokenizer.")
+        if cfg.tokenizer.mode == "import" and not cfg.tokenizer.source:
+            report.error("Imported scratch tokenizers require tokenizer.source.")
         est = self.estimate_footprint(cfg, hw)
         if est.fit == FitLevel.WONT_FIT:
             report.error(f"Predicted VRAM ~{est.total_mb:.0f} MB exceeds budget; shrink the architecture.")
@@ -141,6 +149,8 @@ class ScratchBackend:
             activations_mb=round(acts, 1), overhead_mb=round(overhead, 1),
             total_mb=round(total, 1), budget_mb=budget, fit=fit, source="fallback",
             notes=[f"~{n_params/1e6:.1f}M parameters"],
+            total_parameters=n_params, trainable_parameters=n_params,
+            frozen_parameters=0, trainable_percentage=100.0,
         )
 
     def export_config(self, cfg: RunConfig) -> ExportedConfig:
@@ -184,7 +194,7 @@ class ScratchBackend:
         emit(LogEvent(message=f"Pretraining on {device}; arch={arch.n_layers}L/{arch.n_embd}d/{arch.block_size}ctx"))
 
         corpus = self._read_corpus(cfg, emit)
-        tokenizer = self._train_tokenizer(corpus, arch, ctx, emit)
+        tokenizer = self._load_or_train_tokenizer(corpus, arch, cfg, ctx, emit)
         ids = tokenizer.encode(corpus).ids
         data = torch.tensor(ids, dtype=torch.long)
         emit(LogEvent(message=f"Corpus tokenized: {len(ids):,} tokens, vocab={tokenizer.get_vocab_size()}"))
@@ -198,9 +208,47 @@ class ScratchBackend:
             )
 
         model = _GPT(arch, tokenizer.get_vocab_size()).to(device)
-        emit(LogEvent(message=f"Model built: {sum(p.numel() for p in model.parameters())/1e6:.1f}M params"))
+        total_parameters = sum(p.numel() for p in model.parameters())
+        emit(ProfileEvent(name="parameters", values={
+            "total": total_parameters,
+            "trainable": total_parameters,
+            "frozen": 0,
+            "trainable_percentage": 100.0,
+        }))
+        emit(LogEvent(message=f"Model built: {total_parameters/1e6:.1f}M params"))
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optim.learning_rate,
                                       weight_decay=cfg.optim.weight_decay)
+        start_step = 1
+        if ctx.resume_from:
+            arch_path = ctx.resume_from / "arch.json"
+            if arch_path.is_file():
+                checkpoint_arch = ScratchArch.model_validate_json(arch_path.read_text(encoding="utf-8"))
+                if checkpoint_arch != arch:
+                    raise ValueError(
+                        "Scratch resume architecture does not match the checkpoint arch.json. "
+                        "Use the checkpoint architecture unchanged when resuming."
+                    )
+            weights_path = ctx.resume_from / "model.pt"
+            if not weights_path.is_file():
+                raise ValueError(f"Scratch resume checkpoint is missing {weights_path.name}.")
+            model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
+            state_path = ctx.resume_from / "training.pt"
+            if state_path.is_file():
+                state = torch.load(state_path, map_location="cpu", weights_only=True)
+                optimizer.load_state_dict(state["optimizer"])
+                for optimizer_state in optimizer.state.values():
+                    for key, value in optimizer_state.items():
+                        if torch.is_tensor(value):
+                            optimizer_state[key] = value.to(device)
+                torch.set_rng_state(state["cpu_rng"])
+                if torch.cuda.is_available() and state.get("cuda_rng"):
+                    torch.cuda.set_rng_state_all(state["cuda_rng"])
+                start_step = int(state["step"]) + 1
+                emit(LogEvent(message=f"Resuming scratch optimizer/RNG state at step {start_step}."))
+            else:
+                emit(LogEvent(level="warning", message=(
+                    "Legacy scratch checkpoint has weights only; optimizer/RNG state cannot be restored."
+                )))
 
         block = arch.block_size
         batch = cfg.train.per_device_batch_size
@@ -214,7 +262,9 @@ class ScratchBackend:
             y = torch.stack([src[i + 1:i + 1 + block] for i in ix])
             return x.to(device), y.to(device)
 
-        for step in range(1, max_steps + 1):
+        final_step = start_step - 1
+        for step in range(start_step, max_steps + 1):
+            final_step = step
             model.train()
             x, y = get_batch("train")
             _, loss = model(x, y)
@@ -226,14 +276,28 @@ class ScratchBackend:
             if step % cfg.train.logging_steps == 0 or step == 1:
                 tps = step * batch * block / max(1e-6, time.time() - t0)
                 eta = (time.time() - t0) / step * (max_steps - step)
-                emit(MetricEvent(step=step, total_steps=max_steps, metrics={
+                metrics = {
                     "loss": round(float(loss.item()), 4),
                     "tokens_per_sec": round(tps, 1),
                     "eta_seconds": round(eta, 1),
-                }))
+                }
+                if len(val_data) > block + 1:
+                    cpu_rng = torch.get_rng_state()
+                    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                    try:
+                        model.eval()
+                        with torch.no_grad():
+                            val_x, val_y = get_batch("val")
+                            _, val_loss = model(val_x, val_y)
+                        metrics["validation_loss"] = round(float(val_loss.item()), 4)
+                    finally:
+                        torch.set_rng_state(cpu_rng)
+                        if cuda_rng is not None:
+                            torch.cuda.set_rng_state_all(cuda_rng)
+                emit(MetricEvent(step=step, total_steps=max_steps, metrics=metrics))
 
             if step % cfg.train.save_steps == 0:
-                self._save(model, tokenizer, cfg, ctx, step, is_final=False, emit=emit)
+                self._save(model, tokenizer, optimizer, cfg, ctx, step, is_final=False, emit=emit)
                 sample = self._sample(model, tokenizer, device, emit_step=step)
                 emit(SampleEvent(step=step, text=sample))
 
@@ -241,7 +305,7 @@ class ScratchBackend:
                 emit(LogEvent(level="warning", message="Stop requested — saving and halting."))
                 break
 
-        self._save(model, tokenizer, cfg, ctx, step, is_final=True, emit=emit)
+        self._save(model, tokenizer, optimizer, cfg, ctx, final_step, is_final=True, emit=emit)
 
     # -------------------------------------------------------------------
     def _read_corpus(self, cfg: RunConfig, emit) -> str:
@@ -260,8 +324,18 @@ class ScratchBackend:
         return "\n".join(_extract_text(record) for _, record in _iter_records(Path(row.path), row.fmt)
                          if isinstance(record, dict))
 
-    def _train_tokenizer(self, corpus: str, arch: ScratchArch, ctx: RunContext, emit):
+    def _load_or_train_tokenizer(self, corpus: str, arch: ScratchArch, cfg: RunConfig, ctx: RunContext, emit):
         from tokenizers import ByteLevelBPETokenizer
+
+        source = ctx.resume_from if ctx.resume_from else (
+            Path(cfg.tokenizer.source) if cfg.tokenizer.mode == "import" and cfg.tokenizer.source else None
+        )
+        if source:
+            vocab, merges = source / "vocab.json", source / "merges.txt"
+            if not vocab.is_file() or not merges.is_file():
+                raise ValueError("Imported/resumed scratch tokenizer requires vocab.json and merges.txt.")
+            emit(LogEvent(message=f"Loading scratch tokenizer from {source}."))
+            return ByteLevelBPETokenizer(str(vocab), str(merges))
 
         emit(LogEvent(message=f"Training byte-level BPE tokenizer (vocab={arch.vocab_size})…"))
         tok_dir = ctx.workdir / "tokenizer"
@@ -279,12 +353,18 @@ class ScratchBackend:
         tokenizer.save_model(str(tok_dir))
         return tokenizer
 
-    def _save(self, model, tokenizer, cfg, ctx, step, is_final, emit):
+    def _save(self, model, tokenizer, optimizer, cfg, ctx, step, is_final, emit):
         import torch
 
         out_dir = ctx.workdir / ("output" if is_final else f"checkpoints/checkpoint-{step}")
         out_dir.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), out_dir / "model.pt")
+        torch.save({
+            "step": step,
+            "optimizer": optimizer.state_dict(),
+            "cpu_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        }, out_dir / "training.pt")
         (out_dir / "arch.json").write_text((cfg.arch or ScratchArch()).model_dump_json(indent=2))
         tokenizer.save_model(str(out_dir))
         emit(CheckpointEvent(step=step, path=str(out_dir), is_final=is_final))
@@ -293,10 +373,17 @@ class ScratchBackend:
         import torch
 
         model.eval()
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
         idx = torch.zeros((1, 1), dtype=torch.long, device=device)
-        with torch.no_grad():
-            out = model.generate(idx, max_new_tokens=max_new)
-        return tokenizer.decode(out[0].tolist())
+        try:
+            with torch.no_grad():
+                out = model.generate(idx, max_new_tokens=max_new)
+            return tokenizer.decode(out[0].tolist())
+        finally:
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
 
 
 # --------------------------------------------------------------------------- #

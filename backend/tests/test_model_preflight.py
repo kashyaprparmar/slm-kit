@@ -79,7 +79,7 @@ def test_seq2seq_rejected_in_run_validation():
     cfg = RunConfig(
         backend="transformers",
         task=TaskType.FINETUNE,
-        method=Method.LORA,
+        method=Method.FREEZE,
         base_model="google/flan-t5-base",
         output_name="test-t5",
     )
@@ -93,14 +93,18 @@ def test_generic_transformers_backend_operates_independently():
     backend = get_backend("transformers")
     assert backend.name == "transformers"
     assert TaskType.FINETUNE in backend.supported_tasks
-    assert Method.LORA in backend.supported_methods
+    assert Method.FULL in backend.supported_methods
+    assert Method.FREEZE in backend.supported_methods
+    # Adapter methods are advertised only when PEFT is actually installed.
+    assert (Method.LORA in backend.supported_methods) == backend.capabilities().peft["lora"].support.allowed
 
     cfg = RunConfig(
         backend="transformers",
         task=TaskType.FINETUNE,
-        method=Method.LORA,
+        method=Method.FREEZE,
         base_model="Qwen/Qwen2.5-0.5B-Instruct",
         output_name="test-tf",
+        optim={"optimizer": "adamw_torch"},
     )
     hw = HardwareProfile(gpu_count=0, ram_gb=16.0)
     report = backend.validate_config(cfg, hw)

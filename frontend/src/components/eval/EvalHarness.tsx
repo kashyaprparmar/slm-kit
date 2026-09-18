@@ -58,6 +58,9 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
   const [phase, setPhase] = useState<{ phase: string; model?: string; elapsed?: number } | null>(null);
 
   const past = useQuery({ queryKey: ["eval-results"], queryFn: api.evalResults });
+  const modelOptions = useQuery({ queryKey: ["model-options"], queryFn: api.modelOptions });
+  const selectedOptions = models.map((ref) => modelOptions.data?.models.find((option) => option.ref === ref || option.load_ref === ref));
+  const rewardEvaluation = selectedOptions.length > 0 && selectedOptions.every((option) => option?.model_category === "reward_model");
   const status = useQuery({ queryKey: ["eval-status"], queryFn: api.evalStatus, refetchInterval: 3000 });
   const busyElsewhere = (status.data?.busy ?? false) && !running;
 
@@ -190,7 +193,7 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
             {models.map((m, i) => (
               <div key={i} className="flex items-start gap-2">
                 <div className="flex-1">
-                  <BaseModelPicker value={m} onChange={(v) => setModels((ms) => ms.map((x, j) => (j === i ? v : x)))} />
+                  <BaseModelPicker value={m} allowRewardModels onChange={(v) => setModels((ms) => ms.map((x, j) => (j === i ? v : x)))} />
                 </div>
                 {models.length > 1 && (
                   <Button size="icon" variant="ghost" className="mt-6" onClick={() => setModels((ms) => ms.filter((_, j) => j !== i))}>
@@ -199,10 +202,10 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
                 )}
               </div>
             ))}
-            <DatasetPicker value={datasetId} onChange={setDatasetId} kinds={["eval", "instruction"]} />
+            <DatasetPicker value={datasetId} onChange={setDatasetId} kinds={rewardEvaluation ? ["preference"] : ["eval", "instruction"]} />
             <div className="grid grid-cols-2 gap-4">
               <NumberField label="Max samples" value={maxSamples} min={1} max={500} onChange={(v) => setMaxSamples(v ?? 25)} hint="keep small for quick iterations" />
-              <Field label="Metrics">
+              {!rewardEvaluation && <Field label="Metrics">
                 <div className="flex flex-wrap gap-x-4 gap-y-1.5 pt-1">
                   {METRIC_OPTIONS.map((m) => (
                     <label key={m.key} className="flex cursor-pointer items-center gap-1.5 text-xs">
@@ -215,7 +218,8 @@ export function EvalHarness({ judgeAvailable }: { judgeAvailable: boolean }) {
                     LLM-as-judge {!judgeAvailable && "(needs API key)"}
                   </label>
                 </div>
-              </Field>
+              </Field>}
+              {rewardEvaluation && <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">Reward evaluation reports chosen and rejected scores, reward margin, and pairwise accuracy.</div>}
             </div>
             {busyElsewhere && (
               <div className="flex items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">

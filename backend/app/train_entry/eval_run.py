@@ -73,6 +73,46 @@ def load_rows(dataset_id: int, limit: int) -> list[dict]:
     return rows
 
 
+def _reward_pair(row: dict, tokenizer) -> tuple[str, str]:
+    from app.train_entry.tokenization import render_preference_row
+
+    rendered = render_preference_row(row, tokenizer)
+    prompt = rendered["prompt"]
+    return prompt + rendered["chosen"], prompt + rendered["rejected"]
+
+
+def eval_reward_model(model_ref: str, rows: list[dict]) -> dict:
+    from app.train_entry.model_runtime import load_reward_runtime
+
+    emit({"type": "log", "message": f"Loading reward model {model_ref}..."})
+    runtime = None
+    try:
+        with Heartbeat("loading_model", model_ref):
+            runtime = load_reward_runtime(model_ref)
+        chosen_scores: list[float] = []
+        rejected_scores: list[float] = []
+        for index, row in enumerate(rows, start=1):
+            chosen, rejected = _reward_pair(row, runtime.tokenizer)
+            chosen_scores.append(runtime.score(chosen))
+            rejected_scores.append(runtime.score(rejected))
+            emit({"type": "progress", "model": model_ref, "done": index, "total": len(rows)})
+        margins = [chosen - rejected for chosen, rejected in zip(chosen_scores, rejected_scores, strict=True)]
+        scores = {
+            "chosen_score": sum(chosen_scores) / len(chosen_scores),
+            "rejected_score": sum(rejected_scores) / len(rejected_scores),
+            "reward_margin": sum(margins) / len(margins),
+            "pairwise_accuracy": sum(margin > 0 for margin in margins) / len(margins),
+        }
+        pairs = [
+            {"chosen_score": chosen, "rejected_score": rejected, "margin": margin}
+            for chosen, rejected, margin in zip(chosen_scores, rejected_scores, margins, strict=True)
+        ]
+        return {"scores": scores, "pairs": pairs, "kind": "reward_model"}
+    finally:
+        if runtime is not None:
+            runtime.unload()
+
+
 def eval_model(model_ref: str, prompts: list[str], refs: list[str], cfg: dict) -> dict:
     from app.eval import metrics as metrics_module
     from app.integrations import judge
@@ -125,6 +165,36 @@ def main(cfg_path: str) -> int:
     cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
     try:
         rows = load_rows(cfg["dataset_id"], int(cfg.get("max_samples", 50)))
+        if cfg.get("evaluation_mode") == "reward":
+            per_model: dict[str, dict] = {}
+            all_pairs: dict[str, list[dict]] = {}
+            for model_ref in cfg["models"]:
+                started = time.time()
+                result = eval_reward_model(model_ref, rows)
+                per_model[model_ref] = {
+                    "scores": result["scores"],
+                    "seconds": round(time.time() - started, 1),
+                    "kind": result["kind"],
+                }
+                all_pairs[model_ref] = result["pairs"]
+                emit({"type": "model_done", "model": model_ref, "scores": result["scores"]})
+            samples = [
+                {
+                    "prompt": f"Preference pair {index + 1}",
+                    "reference": "chosen should score higher",
+                    "preds": {
+                        model: (
+                            f"chosen={all_pairs[model][index]['chosen_score']:.4f}, "
+                            f"rejected={all_pairs[model][index]['rejected_score']:.4f}, "
+                            f"margin={all_pairs[model][index]['margin']:.4f}"
+                        )
+                        for model in cfg["models"]
+                    },
+                }
+                for index in range(min(len(rows), 10))
+            ]
+            emit({"type": "result", "per_model": per_model, "samples": samples})
+            return 0
         pairs = [_extract(row) for row in rows]
         prompts, refs = [pair[0] for pair in pairs], [pair[1] for pair in pairs]
         emit({"type": "log", "message": f"Evaluating {len(cfg['models'])} model(s) on {len(prompts)} samples."})

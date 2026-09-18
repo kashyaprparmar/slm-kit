@@ -31,11 +31,12 @@ export function RunMonitor({ runId }: { runId: number }) {
   const [liveLogs, setLiveLogs] = useState<LogLine[]>([]);
   const [latest, setLatest] = useState<{ step: number; total?: number; tps?: number; eta?: number; epoch?: number; lr?: number; vram?: number; elapsed?: number }>({ step: 0 });
   const [samples, setSamples] = useState<string[]>([]);
+  const [profiles, setProfiles] = useState<Record<string, Record<string, unknown>>>({});
   const [liveStatus, setLiveStatus] = useState<RunStatus | null>(null);
 
   // Reset when switching runs.
   useEffect(() => {
-    setSeries([]); setLiveLogs([]); setLatest({ step: 0 }); setSamples([]); setLiveStatus(null);
+    setSeries([]); setLiveLogs([]); setLatest({ step: 0 }); setSamples([]); setProfiles({}); setLiveStatus(null);
   }, [runId]);
 
   // Seed the chart from persisted history so finished runs still plot their curve.
@@ -86,6 +87,8 @@ export function RunMonitor({ runId }: { runId: number }) {
       setLatest((latest) => ({ ...latest, vram: ev.resources.vram_mb }));
     } else if (ev.type === "sample") {
       setSamples((s) => [ev.text, ...s].slice(0, 5));
+    } else if (ev.type === "profile") {
+      setProfiles((current) => ({ ...current, [ev.name]: ev.values }));
     } else if (ev.type === "status") {
       setLiveStatus(ev.status as RunStatus);
       if (ev.status === "done") toast.success(`Run #${runId} finished`);
@@ -150,6 +153,13 @@ export function RunMonitor({ runId }: { runId: number }) {
             </div>
 
             <LossChart series={series} />
+
+            {Object.keys(profiles).length > 0 && (
+              <details className="rounded-md border p-3 text-xs" open>
+                <summary className="cursor-pointer font-medium">Resolved training plan</summary>
+                <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">{JSON.stringify(profiles, null, 2)}</pre>
+              </details>
+            )}
 
             {samples.length > 0 && (
               <div className="space-y-1.5">

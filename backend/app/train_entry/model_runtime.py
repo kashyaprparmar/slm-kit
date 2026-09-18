@@ -17,7 +17,7 @@ import logging
 import math
 import threading
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from app.model_refs import ResolvedModel, resolve_model_ref
@@ -42,6 +42,9 @@ def _device_for(model):
 
 def _encode(tokenizer, prompt: str, device, params=None):
     params = params or {}
+    if params.get("raw_prompt"):
+        encoded = tokenizer(prompt, return_tensors="pt")
+        return {key: value.to(device) for key, value in encoded.items() if hasattr(value, "to")}
     messages = params.get("messages") or ([{"role": "system", "content": params["system_prompt"]}] if params.get("system_prompt") else []) + [{"role": "user", "content": prompt}]
     encoded = None
     try:
@@ -66,6 +69,7 @@ class ModelRuntime:
     tokenizer: object
     device: object
     scratch: bool = False
+    load_metadata: dict = field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
@@ -222,6 +226,34 @@ class ModelRuntime:
             torch.cuda.empty_cache()
 
 
+@dataclass
+class RewardModelRuntime:
+    """Scalar sequence-scoring runtime; it intentionally has no generate API."""
+
+    spec: ResolvedModel
+    model: object
+    tokenizer: object
+    device: object
+
+    def score(self, text: str) -> float:
+        import torch
+
+        encoded = self.tokenizer(text, return_tensors="pt", truncation=True)
+        encoded = {key: value.to(self.device) for key, value in encoded.items()}
+        with torch.inference_mode():
+            logits = self.model(**encoded).logits
+        if logits.numel() != 1:
+            raise RuntimeError("Reward model must produce exactly one scalar score per sequence.")
+        return float(logits.reshape(-1)[0].detach().cpu())
+
+    def unload(self) -> None:
+        import torch
+
+        del self.model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def _load_scratch(spec: ResolvedModel) -> ModelRuntime:
     import torch
     from tokenizers import ByteLevelBPETokenizer
@@ -245,9 +277,9 @@ def _load_scratch(spec: ResolvedModel) -> ModelRuntime:
     return ModelRuntime(spec=spec, model=model, tokenizer=tokenizer, device=device, scratch=True)
 
 
-def _load_transformers(spec: ResolvedModel) -> ModelRuntime:
+def _load_transformers(spec: ResolvedModel, *, for_merge: bool = False, base_revision: str | None = None) -> ModelRuntime:
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     from app.config import get_settings
 
@@ -256,6 +288,7 @@ def _load_transformers(spec: ResolvedModel) -> ModelRuntime:
     from app.integrations.hf_hub import _token
     common = {"token": _token(), "cache_dir": str(settings.hf_cache_dir), "trust_remote_code": trust_remote_code}
     load_ref = spec.load_ref
+    load_metadata = {}
     if spec.kind == "transformers" and spec.local_path is None:
         # Remote PEFT repositories look like ordinary HF ids to the lightweight
         # resolver. Probe their small adapter config before loading gigabytes of
@@ -275,36 +308,116 @@ def _load_transformers(spec: ResolvedModel) -> ModelRuntime:
         except Exception:
             pass
     if spec.kind == "adapter":
-        from peft import PeftModel
+        from peft import PeftConfig, PeftModel
 
         assert spec.base_model and spec.adapter_path
+        adapter_config = PeftConfig.from_pretrained(spec.adapter_path, token=_token())
+        recorded_revision = getattr(adapter_config, "revision", None)
+        if for_merge and base_revision and recorded_revision and recorded_revision != base_revision:
+            raise ValueError("Requested base revision differs from the adapter's recorded revision.")
+        base_common = {**common, "revision": base_revision or recorded_revision}
+        if for_merge:
+            if Path(spec.base_model).is_dir():
+                from app.train_entry.export import fingerprint
+                load_metadata["base_fingerprint"] = fingerprint(Path(spec.base_model))
+            if not Path(spec.base_model).exists():
+                import re
+                if not re.fullmatch(r"[0-9a-fA-F]{40}", base_common["revision"] or ""):
+                    raise ValueError("Remote adapter merging requires the immutable base commit used for training; mutable or unknown revisions are unsafe.")
+            base_config = AutoConfig.from_pretrained(spec.base_model, **base_common)
+            if getattr(base_config, "quantization_config", None):
+                raise ValueError("Cannot merge adapters into a quantized base. Use the original unquantized base.")
         tokenizer_ref = spec.adapter_path
         try:
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_ref, **common)
         except Exception:
-            tokenizer = AutoTokenizer.from_pretrained(spec.base_model, **common)
+            if for_merge and Path(tokenizer_ref).is_dir() and any((Path(tokenizer_ref) / name).exists() for name in ("tokenizer.json", "tokenizer_config.json")):
+                raise ValueError("Adapter tokenizer metadata exists but cannot be loaded safely.")
+            tokenizer = AutoTokenizer.from_pretrained(spec.base_model, **base_common)
+        if for_merge:
+            base_tokenizer = AutoTokenizer.from_pretrained(spec.base_model, **base_common)
+            if tokenizer.get_vocab() != base_tokenizer.get_vocab() or tokenizer.special_tokens_map != base_tokenizer.special_tokens_map:
+                raise ValueError("Adapter and base tokenizers differ; merging requires verified vocabulary and special-token compatibility.")
         base = AutoModelForCausalLM.from_pretrained(
             spec.base_model,
-            dtype="auto",
+            torch_dtype="auto",
+            device_map="auto" if torch.cuda.is_available() else None,
+            **base_common,
+        )
+        expected_class = (getattr(adapter_config, "auto_mapping", None) or {}).get("base_model_class")
+        if for_merge and expected_class and type(base).__name__ != expected_class:
+            raise ValueError(f"Adapter expects {expected_class}; loaded base architecture is {type(base).__name__}.")
+        model = PeftModel.from_pretrained(base, spec.adapter_path, token=_token())
+        if for_merge:
+            load_metadata["base_revision"] = base_common["revision"]
+            if "base_fingerprint" in load_metadata and fingerprint(Path(spec.base_model)) != load_metadata["base_fingerprint"]:
+                raise ValueError("Local base changed while loading; safe merging requires an immutable base.")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(load_ref, **common)
+        model = AutoModelForCausalLM.from_pretrained(
+            load_ref,
+            torch_dtype="auto",
+            device_map="auto" if torch.cuda.is_available() else None,
+            **common,
+        )
+    model.eval()
+    return ModelRuntime(spec=spec, model=model, tokenizer=tokenizer, device=_device_for(model), load_metadata=load_metadata)
+
+
+def load_runtime(model_ref: str, *, for_merge: bool = False, base_revision: str | None = None) -> ModelRuntime:
+    """Load any supported reference and return a common inference runtime."""
+    spec = resolve_model_ref(model_ref)
+    if spec.model_category == "reward_model":
+        raise ValueError("Reward models score sequences and cannot be loaded for text generation.")
+    if spec.kind == "scratch":
+        return _load_scratch(spec)
+    return _load_transformers(spec, for_merge=for_merge, base_revision=base_revision)
+
+
+def load_reward_runtime(model_ref: str) -> RewardModelRuntime:
+    """Load a registered scalar reward artifact for pairwise evaluation."""
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    from app.config import get_settings
+    from app.integrations.hf_hub import _token
+
+    spec = resolve_model_ref(model_ref)
+    if spec.model_category != "reward_model":
+        raise ValueError("Pairwise reward evaluation requires a registered reward-model artifact.")
+    settings = get_settings()
+    common = {
+        "token": _token(),
+        "cache_dir": str(settings.hf_cache_dir),
+        "trust_remote_code": settings.trust_remote_code,
+    }
+    if spec.kind == "adapter":
+        from peft import PeftModel
+
+        assert spec.base_model and spec.adapter_path
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(spec.adapter_path, **common)
+        except Exception:
+            tokenizer = AutoTokenizer.from_pretrained(spec.base_model, **common)
+        base = AutoModelForSequenceClassification.from_pretrained(
+            spec.base_model,
+            num_labels=1,
+            torch_dtype="auto",
             device_map="auto" if torch.cuda.is_available() else None,
             **common,
         )
         model = PeftModel.from_pretrained(base, spec.adapter_path, token=_token())
     else:
-        tokenizer = AutoTokenizer.from_pretrained(load_ref, **common)
-        model = AutoModelForCausalLM.from_pretrained(
-            load_ref,
-            dtype="auto",
+        tokenizer = AutoTokenizer.from_pretrained(spec.load_ref, **common)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            spec.load_ref,
+            num_labels=1,
+            torch_dtype="auto",
             device_map="auto" if torch.cuda.is_available() else None,
             **common,
         )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model.config.pad_token_id = tokenizer.pad_token_id
     model.eval()
-    return ModelRuntime(spec=spec, model=model, tokenizer=tokenizer, device=_device_for(model))
-
-
-def load_runtime(model_ref: str) -> ModelRuntime:
-    """Load any supported reference and return a common inference runtime."""
-    spec = resolve_model_ref(model_ref)
-    if spec.kind == "scratch":
-        return _load_scratch(spec)
-    return _load_transformers(spec)
+    return RewardModelRuntime(spec=spec, model=model, tokenizer=tokenizer, device=_device_for(model))

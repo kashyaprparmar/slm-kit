@@ -168,3 +168,24 @@ class EvalResult(SQLModel, table=True):
     scores: dict = Field(default_factory=dict, sa_column=Column(JSON))
     detail: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ServingBenchmark(SQLModel, table=True):
+    """A reproducible measurement of a running serving provider.
+
+    Deployments are intentionally process state rather than database rows.  This
+    snapshot links the measurement to an optional artifact and records the
+    provider/hardware state that was actually measured.
+    """
+    id: int | None = Field(default=None, primary_key=True)
+    artifact_id: int | None = Field(default=None, foreign_key="modelartifact.id")
+    provider: str
+    model_ref: str
+    endpoint: str
+    status: str = "running"       # running | completed | failed | cancelled
+    config: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    hardware: dict | None = Field(default=None, sa_column=Column(JSON))
+    results: dict | None = Field(default=None, sa_column=Column(JSON))
+    error: str | None = None
+    started_at: datetime = Field(default_factory=_utcnow)
+    completed_at: datetime | None = None

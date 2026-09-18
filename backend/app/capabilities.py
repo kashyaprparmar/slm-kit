@@ -75,6 +75,17 @@ DEPENDENCIES: tuple[DependencySpec, ...] = (
     DependencySpec(name="tiktoken", optional=True),
     DependencySpec(name="torchao", optional=True),
     DependencySpec(name="xformers", optional=True),
+    DependencySpec(name="flash-attn", import_name="flash_attn", optional=True),
+    DependencySpec(name="liger-kernel", import_name="liger_kernel", optional=True),
+    # Advanced optimization integrations are deliberately optional.  Keep this
+    # metadata-only so inspecting capabilities never imports a CUDA extension.
+    DependencySpec(name="galore-torch", import_name="galore_torch", optional=True),
+    DependencySpec(name="apollo-torch", import_name="apollo_torch", optional=True),
+    DependencySpec(name="badam", optional=True),
+    DependencySpec(name="adam-mini", import_name="adam_mini", optional=True),
+    DependencySpec(name="muon", optional=True),
+    DependencySpec(name="llamafactory", optional=True),
+    DependencySpec(name="llamafactory-cli", optional=True, executable=True),
     DependencySpec(name="vllm", optional=True),
     DependencySpec(name="sglang", optional=True),
     DependencySpec(name="ollama", optional=True, executable=True),
@@ -128,12 +139,39 @@ class PeftMethodCapability(BaseModel):
     support: Capability
     adapter_based: bool = True
     requires_quantized_base: bool = False
+    features: dict[str, Capability] = Field(default_factory=dict)
 
 
 class QuantizationCapability(BaseModel):
     format: str
     operations: list[str] = Field(default_factory=list)
     support: Capability
+    compute_dtypes: list[str] = Field(default_factory=list)
+    storage_dtypes: list[str] = Field(default_factory=list)
+    double_quantization: bool = False
+    installed_version: str | None = None
+    operation_capabilities: dict[str, Capability] = Field(default_factory=dict)
+    calibration_required: bool = False
+
+
+class OptimizationCapability(BaseModel):
+    """One advanced optimization option exposed consistently to API and UI.
+
+    ``configuration_schema`` is intentionally descriptive JSON rather than a
+    second configuration model.  The authoritative values remain RunConfig;
+    this shape lets clients render only controls which are safe for the active
+    backend/runtime.
+    """
+
+    id: str
+    label: str
+    category: Literal["peft", "optimizer", "acceleration"]
+    disclosure: Literal["recommended", "advanced", "expert"]
+    support: Capability
+    installed_version: str | None = None
+    compatibility: dict[str, object] = Field(default_factory=dict)
+    configuration_schema: dict[str, object] = Field(default_factory=dict)
+    impact: dict[str, object] = Field(default_factory=dict)
 
 
 class ServingProviderCapabilities(BaseModel):
@@ -144,6 +182,9 @@ class ServingProviderCapabilities(BaseModel):
     operations: dict[str, Capability]
     model_formats: list[str] = Field(default_factory=list)
     required_dependencies: list[str] = Field(default_factory=list)
+    installed_version: str | None = None
+    features: dict[str, Capability] = Field(default_factory=dict)
+    configuration_schema: dict = Field(default_factory=dict)
 
     @property
     def enabled_operations(self) -> list[str]:

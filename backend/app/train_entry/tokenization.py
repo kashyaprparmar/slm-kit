@@ -39,6 +39,67 @@ def _tokenize_rendered(tokenizer, rendered: str) -> list[int]:
     return _ids(encoded["input_ids"] if hasattr(encoded, "__getitem__") else encoded.input_ids)
 
 
+def render_preference_row(
+    row: Mapping[str, Any] | Any,
+    tokenizer,
+    *,
+    chat_template: str | None = None,
+) -> dict[str, str]:
+    """Render one canonical preference record into exact prompt/completion strings."""
+    if chat_template is not None:
+        if not chat_template.strip():
+            raise TokenizerDataError("A custom chat template cannot be blank.")
+        tokenizer.chat_template = chat_template
+    try:
+        record = canonicalize(dict(row) if isinstance(row, Mapping) else row)
+    except DatasetSchemaError as exc:
+        raise TokenizerDataError(str(exc)) from exc
+    if record.kind != "preference":
+        raise TokenizerDataError(f"Preference training requires preference rows, got {record.kind}.")
+    prompt_messages = [message.model_dump() for message in record.prompt]
+    prompt = _render_messages(tokenizer, prompt_messages, generation_prompt=True)
+
+    def continuation(messages) -> str:
+        rendered = _render_messages(
+            tokenizer,
+            [*prompt_messages, *(message.model_dump() for message in messages)],
+        )
+        if not rendered.startswith(prompt):
+            raise TokenizerDataError(
+                "The chat template's preference prompt is not an exact prefix of the completed branch."
+            )
+        return rendered[len(prompt):]
+
+    return {"prompt": prompt, "chosen": continuation(record.chosen), "rejected": continuation(record.rejected)}
+
+
+def render_kto_row(
+    row: Mapping[str, Any] | Any,
+    tokenizer,
+    *,
+    chat_template: str | None = None,
+) -> dict[str, str | bool]:
+    """Render one canonical KTO record without changing its binary label."""
+    if chat_template is not None:
+        if not chat_template.strip():
+            raise TokenizerDataError("A custom chat template cannot be blank.")
+        tokenizer.chat_template = chat_template
+    try:
+        record = canonicalize(dict(row) if isinstance(row, Mapping) else row)
+    except DatasetSchemaError as exc:
+        raise TokenizerDataError(str(exc)) from exc
+    if record.kind != "kto":
+        raise TokenizerDataError(f"KTO requires KTO rows, got {record.kind}.")
+    prompt_messages = [message.model_dump() for message in record.prompt]
+    prompt = _render_messages(tokenizer, prompt_messages, generation_prompt=True)
+    completed = _render_messages(tokenizer, [*prompt_messages, record.response.model_dump()])
+    if not completed.startswith(prompt):
+        raise TokenizerDataError(
+            "The chat template's KTO prompt is not an exact prefix of the completed response."
+        )
+    return {"prompt": prompt, "completion": completed[len(prompt):], "label": record.desirable}
+
+
 def render_and_tokenize(
     row: Mapping[str, Any] | Any,
     tokenizer,

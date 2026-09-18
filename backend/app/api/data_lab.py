@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -27,6 +28,12 @@ from app.db.session import engine
 
 router = APIRouter(prefix="/api", tags=["data-lab"])
 _settings = get_settings()
+_IMMUTABLE_HF_REVISION = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _is_immutable_hf_revision(revision: str | None) -> bool:
+    """Return true only for a full Hugging Face git commit identifier."""
+    return bool(revision and _IMMUTABLE_HF_REVISION.fullmatch(revision.strip()))
 
 
 class TokenizerProfileBody(BaseModel):
@@ -127,9 +134,9 @@ async def tokenizer_profile(version_id: int, body: TokenizerProfileBody):
             raise HTTPException(409, "The immutable dataset version file is unavailable.")
         profile_config = body.model_dump()
         profile_config_fingerprint = json_fingerprint(profile_config)
-        # Pinned revisions are safe to reuse before another Hub lookup. Moving
-        # revisions are always resolved again, then deduplicated by fingerprint.
-        if body.revision:
+        # Only a full commit hash is safe to reuse before another Hub lookup.
+        # Branches and tags must be resolved again because their target can move.
+        if _is_immutable_hf_revision(body.revision):
             artifacts = db.exec(select(TokenizerArtifact).where(
                 TokenizerArtifact.model_ref == body.model_ref,
                 TokenizerArtifact.revision == body.revision,

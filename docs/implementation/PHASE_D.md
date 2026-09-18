@@ -1,6 +1,6 @@
 # Phase D — Optimization and profiling
 
-**Status: Not started.** Audit only. Detailed current implementation and impact records are in [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md). Requirement findings are in [GAP_ANALYSIS.md](GAP_ANALYSIS.md).
+**Status: Partially complete.** Step 17 established the authoritative optimization registry and enabled only the native runtime paths verified by tests. Detailed current implementation and impact records are in [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md). Requirement findings are in [GAP_ANALYSIS.md](GAP_ANALYSIS.md).
 
 ## Entry criteria
 
@@ -10,23 +10,23 @@ Previous phases satisfy their acceptance gates. Resolve task-specific dependenci
 
 ### D01 — Version-gate advanced PEFT strategies
 
-- [ ] Not started. Requirements: R26.
+- [~] Partial. Requirements: R26.
 - Depends on: B05, B07.
-- Change: rsLoRA, LoRA+, PiSSA, LoftQ, EVA strategy descriptors; enable each only after its fixture/runtime test.
+- Change: Registry now reports rsLoRA, LoRA+, PiSSA, LoftQ, EVA, OFT, and QOFT with installed version, compatibility, JSON control schema, and expected impact. Native rsLoRA, PiSSA, and LoRA+ are enabled after an offline PEFT 0.15.2 tiny train/step fixture. LoftQ, EVA, OFT, and QOFT stay unavailable because their joint calibration/quantization or loader paths are not yet verified.
 - Acceptance: Each enabled strategy has version/config compatibility tests and tiny train/save/reload evidence.
 - Evidence to record: changed files, test commands/results, installed runtime versions, migration revision or none, known limitations. See roadmap D01 for database/API/frontend/test/risk impact.
 
 ### D02 — Add optimizer strategy registry
 
-- [ ] Not started. Requirements: R30.
+- [~] Partial. Requirements: R30.
 - Depends on: B01.
-- Change: Schema/validation/estimation hooks; first adapter GaLore, other methods remain gated.
+- Change: Added one import-light registry with shared schema, validation, dependency/version reporting, and estimator hook for GaLore, APOLLO, BAdam, Adam-mini, and Muon. No external optimizer executes until a package-specific adapter has a finite-gradient/checkpoint fixture.
 - Acceptance: Default optimizer unchanged; absent package rejects; GaLore tiny step and estimate evidence pass.
 - Evidence to record: changed files, test commands/results, installed runtime versions, migration revision or none, known limitations. See roadmap D02 for database/API/frontend/test/risk impact.
 
 ### D03 — Add APOLLO optimizer adapter
 
-- [ ] Not started. Requirements: R30.
+- [ ] Deferred. The optional package is absent; its registry descriptor reports actionable installation guidance and remains unavailable.
 - Depends on: D02.
 - Change: Version-gated APOLLO configuration, adapter and memory estimate.
 - Acceptance: APOLLO missing-dependency/config/finite-gradient/checkpoint tests pass before exposed.
@@ -42,9 +42,9 @@ Previous phases satisfy their acceptance gates. Resolve task-specific dependenci
 
 ### D05 — Add Liger and NEFTune options
 
-- [ ] Not started. Requirements: R32, R35.
+- [~] Partial. Requirements: R32, R35.
 - Depends on: D04.
-- Change: Optional kernel/noise strategies with installed-runtime gates.
+- Change: NEFTune is a native, capability-gated `runtime.neftune_noise_alpha` option and is passed through only when the installed trainer config accepts it. Liger and FlashAttention are represented in the registry; their packages are absent in the recorded environment, so neither is exposed as runnable.
 - Acceptance: Standard path unchanged; enabled options recorded and tiny loss/gradient tests pass.
 - Evidence to record: changed files, test commands/results, installed runtime versions, migration revision or none, known limitations. See roadmap D05 for database/API/frontend/test/risk impact.
 
@@ -104,3 +104,11 @@ All tasks above meet their acceptance criteria with evidence in STATUS.md. Backe
 
 Enable each optional optimization only after its own compatibility/runtime tests. D09-D11 precede D08. Keep default SFT unchanged.
 
+## Step 17 evidence
+
+- New authoritative contracts: `app.capabilities.OptimizationCapability`, `TrainingBackendCapabilities.optimizations`, and `app.optimizations`.
+- API and frontend consume the same descriptor, including availability, installed version, compatibility, field schema, disclosure level, and estimated impact. Existing `optional_features` aliases remain for older clients.
+- `RunConfig` changes are additive: `runtime.neftune_noise_alpha` plus typed `optim.strategy`, target-module, rank, and update-interval fields. No database migration is needed because runs persist versioned JSON configuration.
+- Native PEFT maps PiSSA to `LoraConfig(init_lora_weights="pissa")`; LoRA+ uses PEFT's optimizer factory. Both are covered by an offline GPT-2-sized CPU fixture. NEFTune is passed only after checking the installed SFT/alignment config signature.
+- Validation rejects incompatible selections before worker launch. PiSSA is currently unquantized LoRA/DoRA only, and LoRA+ requires native Transformers plus `adamw_torch`.
+- Verification on 2026-09-17: CPU ML focused backend suite **14 passed**; full lean backend suite **149 passed, 3 skipped**; frontend suite **18 passed**; frontend build passed. No GPU, bitsandbytes, FlashAttention, Liger, GaLore, APOLLO, BAdam, Adam-mini, Muon, or LLaMA-Factory runtime was available for execution tests.

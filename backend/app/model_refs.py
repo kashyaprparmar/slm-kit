@@ -16,6 +16,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.db.models import ModelArtifact, Run
@@ -36,16 +37,59 @@ class ResolvedModel:
     adapter_path: str | None = None
     run_id: int | None = None
     local_path: str | None = None
+    artifact_kind: str | None = None
+
+    @property
+    def model_category(self) -> str:
+        return normalize_artifact_kind(self.artifact_kind or self.kind)
 
     @property
     def deployable(self) -> bool:
-        # The bundled transformers server supports every format we can resolve.
-        return True
+        return self.model_category not in {"reward_model", "reference_model"}
+
+    @property
+    def evaluation_capabilities(self) -> list[str]:
+        if self.model_category == "reward_model":
+            return ["pairwise_accuracy", "chosen_score", "rejected_score", "reward_margin"]
+        if self.model_category == "reference_model":
+            return ["preference_log_probability"]
+        return ["generation", "perplexity"]
 
     def public(self) -> dict:
         data = asdict(self)
         data["deployable"] = self.deployable
+        data["model_category"] = self.model_category
+        data["evaluation_capabilities"] = self.evaluation_capabilities
         return data
+
+
+def normalize_artifact_kind(kind: str | None) -> str:
+    """Map historical artifact strings to the stable registry categories."""
+    value = (kind or "").lower()
+    if value in {"adapter"}:
+        return "adapter"
+    if value in {"merged", "merged_model"}:
+        return "merged_model"
+    if value == "reward_model":
+        return "reward_model"
+    if value == "reference_model":
+        return "reference_model"
+    if value in {"gguf", "quantized_model"}:
+        return "quantized_model"
+    return "causal_lm"
+
+
+def _artifact_for_local_path(path: Path) -> ModelArtifact | None:
+    """Look up registry semantics without making local-path resolution DB-dependent."""
+    try:
+        with Session(engine) as db:
+            return db.exec(
+                select(ModelArtifact).where(ModelArtifact.local_path == str(path))
+            ).first()
+    except SQLAlchemyError:
+        # Preflight and first-start repair paths may intentionally run before
+        # the registry schema exists. Filesystem classification still works.
+        return None
 
 
 def run_ref(run_id: int) -> str:
@@ -69,6 +113,7 @@ def _classify_path(
     label: str | None = None,
     base_model: str | None = None,
     run_id: int | None = None,
+    artifact_kind: str | None = None,
 ) -> ResolvedModel:
     if not path.is_dir():
         raise ModelReferenceError(f"Local model directory does not exist: {path}")
@@ -86,6 +131,7 @@ def _classify_path(
             base_model=None,
             run_id=run_id,
             local_path=str(path),
+            artifact_kind=artifact_kind,
         )
 
     adapter_config = path / "adapter_config.json"
@@ -105,6 +151,7 @@ def _classify_path(
             adapter_path=str(path),
             run_id=run_id,
             local_path=str(path),
+            artifact_kind=artifact_kind,
         )
 
     if not (path / "config.json").is_file():
@@ -119,6 +166,7 @@ def _classify_path(
         base_model=base_model,
         run_id=run_id,
         local_path=str(path),
+        artifact_kind=artifact_kind,
     )
 
 
@@ -132,12 +180,27 @@ def _resolve_run(run_id: int, requested_ref: str) -> ResolvedModel:
         if not run.output_dir:
             raise ModelReferenceError(f"Run {run_id} has no output directory.")
         output = Path(run.output_dir) / "output"
+        artifact = db.exec(
+            select(ModelArtifact)
+            .where(
+                ModelArtifact.run_id == run.id,
+                ModelArtifact.status == "ready",
+                ModelArtifact.local_path == str(output),
+            )
+            .order_by(ModelArtifact.created_at.desc())
+        ).first()
+        reward_run = (
+            run.task == "alignment"
+            and (run.config.get("alignment") or {}).get("objective") == "reward_model"
+        )
+        artifact_kind = "reward_model" if reward_run else artifact.kind if artifact else None
         return _classify_path(
             output,
             requested_ref,
             label=run.name,
             base_model=run.base_model or None,
             run_id=run.id,
+            artifact_kind=artifact_kind,
         )
 
 
@@ -159,7 +222,16 @@ def resolve_model_ref(model_ref: str) -> ResolvedModel:
 
     path = Path(ref).expanduser()
     if path.exists():
-        return _classify_path(path.resolve(), ref)
+        resolved_path = path.resolve()
+        artifact = _artifact_for_local_path(resolved_path)
+        return _classify_path(
+            resolved_path,
+            ref,
+            label=artifact.name if artifact else None,
+            base_model=artifact.base_model if artifact else None,
+            run_id=artifact.run_id if artifact else None,
+            artifact_kind=artifact.kind if artifact else None,
+        )
     if path.is_absolute() or ref.startswith((".", "~", "\\")) or ":" in ref:
         raise ModelReferenceError(f"Local model path does not exist: {ref}. Docker paths must exist inside the backend container.")
     if not re.fullmatch(r"[\w.-]+(?:/[\w.-]+)?", ref):

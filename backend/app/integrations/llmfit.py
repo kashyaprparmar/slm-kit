@@ -66,7 +66,20 @@ def estimate_fit(cfg: RunConfig, hw: HardwareProfile) -> MemoryEstimate:
     # Generic llmfit inference totals omit this run's optimizer and batch.
     # Use the training-aware breakdown; llmfit remains available for discovery.
     spec = hf_hub.get_model_spec(model_ref, revision) if model_ref else estimator.spec_from_name("1.5b")
-    return estimator.estimate(cfg, hw, spec)
+    reference_spec = None
+    if cfg.task.value == "alignment" and cfg.alignment.reference.strategy == "separate_model":
+        reference_ref = cfg.alignment.reference.model
+        reference_revision = cfg.alignment.reference.revision
+        if reference_ref:
+            try:
+                reference = resolve_model_ref(reference_ref)
+                reference_ref = reference.base_model if reference.kind == "adapter" else reference.load_ref
+                if reference.kind == "adapter":
+                    reference_revision = None
+            except ModelReferenceError:
+                pass
+            reference_spec = hf_hub.get_model_spec(reference_ref, reference_revision)
+    return estimator.estimate(cfg, hw, spec, reference_spec)
 
 
 def _parse_llmfit_fit(data: Any, hw: HardwareProfile) -> MemoryEstimate | None:

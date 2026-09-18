@@ -64,9 +64,11 @@ async def generate(body: GenerateBody):
     if not body.model_ref.strip():
         raise HTTPException(400, "A model reference is required.")
     try:
-        resolve_model_ref(body.model_ref)
+        resolved = resolve_model_ref(body.model_ref)
     except ModelReferenceError as exc:
         raise HTTPException(400, str(exc))
+    if not resolved.deployable:
+        raise HTTPException(422, "Reward and reference artifacts do not support text generation; use pairwise evaluation.")
     try:
         gen_id = await manager.start_generate(body.model_dump())
     except RuntimeError as e:
@@ -98,21 +100,29 @@ async def run_eval(body: EvalBody):
         raise HTTPException(400, "LLM-as-judge requested but no judge API key is configured.")
     if not 1 <= body.max_samples <= 1_000:
         raise HTTPException(400, "max_samples must be between 1 and 1,000.")
+    resolved_models = []
     for model_ref in models:
         try:
-            resolve_model_ref(model_ref)
+            resolved_models.append(resolve_model_ref(model_ref))
         except ModelReferenceError as exc:
             raise HTTPException(400, str(exc))
     with Session(engine) as db:
         dataset = db.get(Dataset, body.dataset_id)
     if dataset is None:
         raise HTTPException(404, "Evaluation dataset not found.")
-    if dataset.kind not in {"eval", "instruction"}:
-        raise HTTPException(400, "Evaluation requires an eval or instruction dataset.")
+    reward_flags = [model.model_category == "reward_model" for model in resolved_models]
+    if any(reward_flags) and not all(reward_flags):
+        raise HTTPException(400, "Evaluate reward models separately from generative models because their metrics and datasets differ.")
+    reward_evaluation = bool(reward_flags and reward_flags[0])
+    allowed_kinds = {"preference"} if reward_evaluation else {"eval", "instruction"}
+    if dataset.kind not in allowed_kinds:
+        expected = "a preference dataset" if reward_evaluation else "an eval or instruction dataset"
+        raise HTTPException(400, f"This evaluation requires {expected}.")
     if dataset.validation and dataset.validation.get("ok") is False:
         raise HTTPException(400, "The selected dataset has validation errors.")
     cfg = body.model_dump()
     cfg["models"] = list(dict.fromkeys(models))
+    cfg["evaluation_mode"] = "reward" if reward_evaluation else "generation"
     try:
         eval_id = await manager.start_eval(cfg)
     except RuntimeError as e:

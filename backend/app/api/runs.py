@@ -29,16 +29,21 @@ _ALLOWED_DATASET_KINDS = {
     TaskType.PRETRAIN: {DatasetKind.PRETRAIN_CORPUS.value, DatasetKind.DOMAIN_CORPUS.value},
     TaskType.CONTINUED_PRETRAIN: {DatasetKind.DOMAIN_CORPUS.value, DatasetKind.PRETRAIN_CORPUS.value},
     TaskType.FINETUNE: {DatasetKind.INSTRUCTION.value},
+    TaskType.ALIGNMENT: {DatasetKind.PREFERENCE.value, DatasetKind.KTO.value},
 }
 
 
 def _apply_method_defaults(cfg: RunConfig) -> RunConfig:
     if cfg.method == Method.QLORA:
-        cfg.load_in_4bit = True
-    elif cfg.method in (Method.LORA, Method.DORA, Method.FULL):
-        cfg.load_in_4bit = False
+        if cfg.quantization.mode == "none":
+            cfg.quantization.mode = "nf4"
+    cfg.load_in_4bit = cfg.quantization.mode in {"nf4", "fp4"}
     if cfg.method == Method.DORA:
         cfg.lora.use_dora = True
+    if cfg.runtime.gradient_checkpointing == "off":
+        cfg.gradient_checkpointing = False
+    elif cfg.runtime.gradient_checkpointing != "auto":
+        cfg.gradient_checkpointing = True
     return cfg
 
 
@@ -52,6 +57,10 @@ def _validate_dataset(cfg: RunConfig, report: ValidationReport) -> None:
         report.error(f"Dataset {cfg.dataset_id} was not found.")
         return
     allowed = _ALLOWED_DATASET_KINDS[cfg.task]
+    if cfg.task == TaskType.ALIGNMENT:
+        allowed = {
+            DatasetKind.KTO.value if cfg.alignment.objective == "kto" else DatasetKind.PREFERENCE.value
+        }
     if dataset.kind not in allowed:
         report.error(
             f"Dataset '{dataset.name}' is {dataset.kind}, but {cfg.task.value} expects "
@@ -61,16 +70,22 @@ def _validate_dataset(cfg: RunConfig, report: ValidationReport) -> None:
         report.error(f"Dataset '{dataset.name}' has validation errors. Fix or replace it before training.")
 
 
-def _validate_model_capabilities(cfg: RunConfig, report: ValidationReport) -> None:
+def _resolve_model_capabilities(cfg: RunConfig):
+    if cfg.task == TaskType.PRETRAIN or cfg.backend == "scratch":
+        return None
+    resolved = resolve_model_ref(cfg.base_model)
+    return get_model_capabilities(
+        resolved.base_model or resolved.load_ref,
+        None if resolved.kind == "adapter" else cfg.revision,
+    )
+
+
+def _validate_model_capabilities(cfg: RunConfig, report: ValidationReport, capabilities=None) -> None:
     """Apply the same authoritative compatibility rules to estimate and create."""
     if cfg.task == TaskType.PRETRAIN or cfg.backend == "scratch":
         return
     try:
-        resolved = resolve_model_ref(cfg.base_model)
-        capabilities = get_model_capabilities(
-            resolved.base_model or resolved.load_ref,
-            None if resolved.kind == "adapter" else cfg.revision,
-        )
+        capabilities = capabilities or _resolve_model_capabilities(cfg)
     except ModelReferenceError as exc:
         report.error(str(exc))
         return
@@ -84,25 +99,36 @@ def _validate_model_capabilities(cfg: RunConfig, report: ValidationReport) -> No
     operation = {
         TaskType.FINETUNE: "sft",
         TaskType.CONTINUED_PRETRAIN: "continued_pretraining",
+        TaskType.ALIGNMENT: cfg.alignment.objective,
     }.get(cfg.task, "full")
-    if cfg.method in {Method.LORA, Method.QLORA, Method.DORA}:
+    if cfg.task != TaskType.ALIGNMENT and cfg.method in {Method.FREEZE, Method.LORA, Method.QLORA, Method.DORA}:
         operation = cfg.method.value
     capability = capabilities.training[operation]
     if not is_allowed(capability):
         report.error(f"{capabilities.family}: {capability.reason}")
     elif capability.state == SupportState.EXPERIMENTAL:
         report.warn(f"{capabilities.family} support is experimental: {capability.reason}")
-    backend_capability = capabilities.backends.get(cfg.backend)
+    backend_capability = capabilities.backends.get(cfg.backend) if cfg.backend in {"transformers", "unsloth"} else None
     if backend_capability and not is_allowed(backend_capability):
         report.error(f"Backend '{cfg.backend}' cannot handle this model: {backend_capability.reason}")
     if cfg.train.max_seq_length and capabilities.context_length and cfg.train.max_seq_length > capabilities.context_length:
-        report.error(
-            f"Context length {cfg.train.max_seq_length:,} exceeds the model limit of "
-            f"{capabilities.context_length:,}."
-        )
+        rope_capability = capabilities.rope.get(cfg.runtime.rope.type)
+        if not cfg.runtime.rope.enabled or not rope_capability or not rope_capability.allowed:
+            report.error(
+                f"Context length {cfg.train.max_seq_length:,} exceeds the model limit of "
+                f"{capabilities.context_length:,}; request a supported explicit RoPE policy to extend it."
+            )
+        elif cfg.train.max_seq_length > int(capabilities.context_length * cfg.runtime.rope.factor):
+            report.error(
+                f"Context length {cfg.train.max_seq_length:,} exceeds the requested RoPE-scaled limit of "
+                f"{int(capabilities.context_length * cfg.runtime.rope.factor):,}."
+            )
+    attention = capabilities.attention.get(cfg.runtime.attention)
+    if attention and not attention.allowed:
+        report.error(f"Attention '{cfg.runtime.attention}' is unsupported: {attention.reason}")
 
 
-def _run_plan(cfg: RunConfig, estimate, hardware, report: ValidationReport) -> dict:
+def _run_plan(cfg: RunConfig, estimate, hardware, report: ValidationReport, selection=None) -> dict:
     with Session(engine) as db:
         dataset = db.get(Dataset, cfg.dataset_id) if cfg.dataset_id else None
     model = None
@@ -122,6 +148,7 @@ def _run_plan(cfg: RunConfig, estimate, hardware, report: ValidationReport) -> d
         "family": model.family if model else "SLM Kit GPT",
         "architecture": model.architecture_kind if model else "scratch",
         "backend": cfg.backend,
+        "backend_resolution": selection.as_dict() if selection else None,
         "task": cfg.task.value,
         "method": cfg.method.value,
         "dataset": dataset.name if dataset else None,
@@ -133,6 +160,15 @@ def _run_plan(cfg: RunConfig, estimate, hardware, report: ValidationReport) -> d
         "epochs": cfg.train.epochs,
         "max_steps": cfg.train.max_steps,
         "precision": "nf4" if cfg.load_in_4bit else "bf16/fp16 selected by worker hardware",
+        "precision_policy": cfg.runtime.precision,
+        "attention": cfg.runtime.attention,
+        "gradient_checkpointing": cfg.runtime.gradient_checkpointing,
+        "quantization": cfg.quantization.model_dump(mode="json"),
+        "estimated_total_parameters": estimate.total_parameters,
+        "estimated_trainable_parameters": estimate.trainable_parameters,
+        "estimated_frozen_parameters": estimate.frozen_parameters,
+        "estimated_trainable_percentage": estimate.trainable_percentage,
+        "estimated_optimizer_memory_mb": estimate.optimizer_mb,
         "estimated_vram_mb": estimate.total_mb,
         "safe_vram_mb": estimate.safe_budget_mb,
         "headroom_mb": estimate.headroom_mb,
@@ -172,16 +208,22 @@ def estimate(cfg: RunConfig):
     cfg = _apply_method_defaults(cfg)
     hw = read_hardware()
     try:
-        selection = backend_selector.select(cfg)
+        model_capabilities = _resolve_model_capabilities(cfg)
+    except ModelReferenceError:
+        model_capabilities = None
+    try:
+        selection = backend_selector.select(cfg, hw, model_capabilities)
     except KeyError as e:
         raise HTTPException(400, str(e))
+    effective = cfg.model_copy(deep=True)
+    effective.backend = selection.backend.name
     backend = selection.backend
-    est = backend.estimate_footprint(cfg, hw)
-    report = backend.validate_config(cfg, hw)
+    est = backend.estimate_footprint(effective, hw)
+    report = backend.validate_config(effective, hw)
     selection.capabilities.validate_availability(report, required=False)
-    _validate_model_capabilities(cfg, report)
-    _validate_dataset(cfg, report)
-    return {"estimate": est, "validation": report, "hardware": hw, "plan": _run_plan(cfg, est, hw, report)}
+    _validate_model_capabilities(effective, report, model_capabilities)
+    _validate_dataset(effective, report)
+    return {"estimate": est, "validation": report, "hardware": hw, "plan": _run_plan(effective, est, hw, report, selection)}
 
 
 @router.get("")
@@ -205,14 +247,26 @@ async def create_run(cfg: RunConfig):
     cfg = _apply_method_defaults(cfg)
     hw = read_hardware()
     try:
-        selection = backend_selector.select(cfg)
+        model_capabilities = _resolve_model_capabilities(cfg)
+    except ModelReferenceError:
+        model_capabilities = None
+    try:
+        selection = backend_selector.select(cfg, hw, model_capabilities)
     except KeyError as e:
         raise HTTPException(400, str(e))
     backend = selection.backend
+    requested_backend = cfg.backend
+    cfg.backend = backend.name
+    cfg.extra = {
+        **cfg.extra,
+        "backend_resolution": selection.as_dict(),
+        "requested_backend": requested_backend,
+        "effective_backend": backend.name,
+    }
 
     report = backend.validate_config(cfg, hw)
     selection.capabilities.validate_availability(report, required=True)
-    _validate_model_capabilities(cfg, report)
+    _validate_model_capabilities(cfg, report, model_capabilities)
     _validate_dataset(cfg, report)
     if not report.ok:
         raise HTTPException(422, detail={"validation": report.model_dump()})
@@ -311,6 +365,9 @@ def clone_run(run_id: int):
         if not run:
             raise HTTPException(404, "Run not found")
         cfg = RunConfig(**run.config)
+    requested_backend = cfg.extra.get("requested_backend")
+    if isinstance(requested_backend, str):
+        cfg.backend = requested_backend
     cfg.output_name = f"{cfg.output_name}-clone"
     return {"config": cfg}
 
@@ -322,7 +379,7 @@ def export_config(run_id: int):
         if not run:
             raise HTTPException(404, "Run not found")
         cfg = RunConfig(**run.config)
-    return backend_selector.select(cfg).backend.export_config(cfg)
+    return backend_selector.select(cfg, read_hardware()).backend.export_config(cfg)
 
 
 @router.get("/{run_id}/metrics")

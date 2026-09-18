@@ -80,3 +80,13 @@ Artifacts list's path.
 - **GGUF export** → a built llama.cpp at `SLMKIT_LLAMACPP_DIR`.
 
 Neither is required for training — they're optional conveniences.
+
+## Supervised exports
+
+Open **Export artifact** on a ready local artifact. Its available formats come from backend capability checks. Copy an adapter/full model, merge a causal adapter, convert a full model to GGUF, package a GGUF for Ollama, or explicitly publish to a private/public Hub repository. Publishing starts only when you click Start export with a repository entered.
+
+Each job has persisted progress/logs, cancellation, a failure report and lineage; exported copies preserve source files. Merging requires matching vocabulary/special tokens, compatible architecture and an unquantized base. Remote adapters require the original 40-character base commit; supply it if the artifact did not record it. Unknown/mutable revisions are rejected.
+
+BitsAndBytes, GPTQ, AWQ, HQQ, EETQ and AQLM have separate training/loading/inference/export/merge descriptors. Installing a package does not enable an unverified exporter. Current quantized export uses optional llama.cpp; low-bit conversion needs both converter and quantizer. Ollama packaging creates a relative-FROM Modelfile and GGUF copy; automatic chat-template/stops translation is not yet available. Explicit local Ollama import is a separate action.
+
+API: POST `/api/registry/exports`; GET `/api/registry/exports/{artifact_id}`; POST `/api/registry/exports/{artifact_id}/cancel`. Job metadata is stored in the normal artifact record; no database migration is required.

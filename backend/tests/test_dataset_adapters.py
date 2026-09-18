@@ -81,7 +81,6 @@ def test_invalid_or_ambiguous_schemas_are_not_guessed(row):
 
 
 @pytest.mark.parametrize("row,kind", [
-    ({"prompt": "x", "chosen": "yes", "rejected": "no"}, "preference"),
     ({"input_ids": [1, 2], "labels": [1, 2]}, "pretokenized"),
     ({"messages": [{"role": "assistant", "tool_calls": []}], "tools": []}, "tool_calling"),
 ])
@@ -92,6 +91,15 @@ def test_advanced_formats_are_recognized_but_worker_gated(row, kind):
     report = inspect_rows([(1, row)])
     assert report.formats == [kind]
     assert not report.valid
+
+
+def test_preference_format_is_canonical_for_alignment_only():
+    row = {"prompt": "x", "chosen": "yes", "rejected": "no"}
+    record = canonicalize(row)
+    assert record.kind == "preference"
+    report = inspect_rows([(1, row)])
+    assert report.formats == ["preference"]
+    assert report.valid
 
 
 def test_mapping_requires_existing_fields_and_preview_is_bounded():

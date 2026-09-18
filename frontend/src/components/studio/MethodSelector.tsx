@@ -8,24 +8,27 @@ export function MethodSelector({
   value,
   onChange,
   capabilities,
+  allowedMethods,
 }: {
   value: Method;
   onChange: (m: Method) => void;
   capabilities?: Record<string, Capability>;
+  allowedMethods?: Method[];
 }) {
   return (
     <div className="grid grid-cols-2 gap-3">
       {METHODS.map((m) => {
         const active = m.value === value;
         const capability = capabilities?.[m.value];
-        const disabled = capability != null && !["supported", "experimental"].includes(capability.state);
+        const disabled = (allowedMethods != null && !allowedMethods.includes(m.value))
+          || (capability != null && !["supported", "experimental"].includes(capability.state));
         return (
           <button
             key={m.value}
             type="button"
             onClick={() => onChange(m.value)}
             disabled={disabled}
-            title={disabled ? capability.reason : undefined}
+            title={disabled ? capability?.reason ?? "This method is unavailable for the selected training stage." : undefined}
             className={cn(
               "relative rounded-lg border p-3 text-left transition-all",
               active ? "border-primary bg-primary/5 shadow-glow" : "border-border hover:border-primary/40 hover:bg-muted/30",
@@ -46,7 +49,7 @@ export function MethodSelector({
             <p className={cn("mt-1.5 text-[11px] font-medium", active ? "text-primary" : "text-muted-foreground/80")}>
               {m.vramNote}
             </p>
-            {disabled && <p className="mt-1 text-[11px] text-destructive">{capability.reason}</p>}
+            {disabled && <p className="mt-1 text-[11px] text-destructive">{capability?.reason ?? "Unavailable for this training stage."}</p>}
           </button>
         );
       })}

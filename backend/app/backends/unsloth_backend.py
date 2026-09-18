@@ -31,6 +31,7 @@ from app.core.events import (
     CheckpointEvent,
     LogEvent,
     MetricEvent,
+    ProfileEvent,
     TrainingEvent,
 )
 from app.domain import (
@@ -44,8 +45,10 @@ from app.domain import (
     ValidationReport,
 )
 from app.model_refs import ModelReferenceError, resolve_model_ref
+from app.optimizations import optimization_capabilities, validate_optimization_config
 
 _SENTINEL = object()
+_ADAPTER_METHODS = {Method.LORA, Method.QLORA, Method.DORA}
 _UNSLOTH_DEFAULT_TARGET_MODULES = (
     "q_proj",
     "k_proj",
@@ -55,6 +58,30 @@ _UNSLOTH_DEFAULT_TARGET_MODULES = (
     "up_proj",
     "down_proj",
 )
+
+
+def _version_at_least(value: str | None, minimum: tuple[int, ...]) -> bool:
+    if not value or value == "unknown":
+        return False
+    parts = []
+    for token in value.split("."):
+        digits = "".join(character for character in token if character.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts[: len(minimum)]) >= minimum if parts else False
+
+
+def _continued_pretraining_text(row: Mapping[str, Any], line: int, eos: str) -> str:
+    """Return a raw causal-LM row without applying conversational formatting."""
+    from app.datasets.adapters import canonicalize
+
+    record = canonicalize(row)
+    if record.kind != "text":
+        raise ValueError(
+            f"Continued pretraining requires canonical raw text; row {line} is {record.kind}."
+        )
+    return record.content_text() + eos
 
 
 def _unsloth_target_modules(requested: list[str]) -> list[str]:
@@ -76,7 +103,8 @@ class UnslothBackend:
 
     def capabilities(self) -> TrainingBackendCapabilities:
         dependencies = dependency_statuses()
-        required = ["torch", "transformers", "trl", "peft"]
+        optimizations = optimization_capabilities(self.name, dependencies)
+        required = ["torch", "transformers", "trl"] + (["unsloth"] if self.name == "unsloth" else [])
         missing = [name for name in required if not dependencies[name].installed]
         availability = Capability(
             state=SupportState.MISSING_DEPENDENCY if missing else SupportState.SUPPORTED,
@@ -94,35 +122,93 @@ class UnslothBackend:
         supported = Capability(state=SupportState.SUPPORTED, reason="Implemented by the causal-LM training worker.")
         unsupported = Capability(state=SupportState.UNSUPPORTED, reason="This training stage is not implemented by this backend.")
         bitsandbytes_installed = dependencies["bitsandbytes"].installed
+        peft_installed = dependencies["peft"].installed
+        peft_support = supported if peft_installed else Capability(
+            state=SupportState.MISSING_DEPENDENCY,
+            reason="Install PEFT to use adapter-based training.",
+            requirements=["peft"],
+        )
+        peft_advanced_support = peft_support if (
+            peft_installed and _version_at_least(dependencies["peft"].version, (0, 11))
+        ) else Capability(
+            state=SupportState.INCOMPATIBLE if peft_installed else SupportState.MISSING_DEPENDENCY,
+            reason="DoRA/rsLoRA require a verified PEFT version 0.11 or newer.",
+            requirements=["peft>=0.11"],
+        )
         qlora = Capability(
-            state=(SupportState.SUPPORTED if bitsandbytes_installed else SupportState.MISSING_DEPENDENCY),
+            state=(SupportState.SUPPORTED if bitsandbytes_installed and peft_installed else SupportState.MISSING_DEPENDENCY),
             reason=(
                 "4-bit adapter training is implemented on CUDA through bitsandbytes."
-                if bitsandbytes_installed
-                else "Install bitsandbytes to use 4-bit adapter training."
+                if bitsandbytes_installed and peft_installed
+                else "Install PEFT and bitsandbytes to use 4-bit adapter training."
             ),
-            requirements=["bitsandbytes", "CUDA"],
+            requirements=["peft", "bitsandbytes", "CUDA"],
         )
         peft = {
-            Method.LORA.value: PeftMethodCapability(method=Method.LORA.value, support=supported),
+            Method.LORA.value: PeftMethodCapability(
+                method=Method.LORA.value,
+                support=peft_support,
+                features={
+                    option: optimizations[option].support
+                    for option in ("rslora", "lora_plus", "pissa", "loftq", "eva", "oft", "qoft")
+                },
+            ),
             Method.QLORA.value: PeftMethodCapability(
                 method=Method.QLORA.value,
                 support=qlora,
                 requires_quantized_base=True,
             ),
-            Method.DORA.value: PeftMethodCapability(method=Method.DORA.value, support=supported),
+            Method.DORA.value: PeftMethodCapability(method=Method.DORA.value, support=peft_advanced_support),
             Method.PROMPT_TUNING.value: PeftMethodCapability(
                 method=Method.PROMPT_TUNING.value,
                 support=Capability(state=SupportState.UNSUPPORTED, reason="Prompt tuning is not implemented by the current worker."),
             ),
         }
         methods = {
+            Method.FREEZE.value: (
+                supported if self.name == "transformers"
+                else Capability(state=SupportState.UNSUPPORTED, reason="Freeze tuning uses the native Transformers worker profile.")
+            ),
             Method.LORA.value: peft[Method.LORA.value].support,
             Method.QLORA.value: peft[Method.QLORA.value].support,
             Method.DORA.value: peft[Method.DORA.value].support,
             Method.FULL.value: supported,
             Method.PROMPT_TUNING.value: peft[Method.PROMPT_TUNING.value].support,
         }
+        alignment_support = (
+            supported
+            if self.name == "transformers" and dependencies["trl"].installed
+            and _version_at_least(dependencies["trl"].version, (0, 9))
+            and not _version_at_least(dependencies["trl"].version, (0, 24))
+            else Capability(
+                state=SupportState.INCOMPATIBLE if dependencies["trl"].installed else SupportState.MISSING_DEPENDENCY,
+                reason="Native alignment requires a versioned TRL >=0.9,<0.24 installation.",
+                requirements=["trl>=0.9,<0.24"],
+            )
+            if self.name == "transformers"
+            else Capability(
+                state=SupportState.UNSUPPORTED,
+                reason="Alignment uses the shared native TRL preference trainer; select Auto or Transformers.",
+            )
+        )
+        extended_dpo_losses = (
+            alignment_support
+            if self.name == "transformers" and _version_at_least(dependencies["trl"].version, (0, 8))
+            else Capability(
+                state=SupportState.INCOMPATIBLE if dependencies["trl"].installed else SupportState.MISSING_DEPENDENCY,
+                reason="This DPO loss requires an installed TRL 0.8 or newer runtime.",
+                requirements=["trl>=0.8"],
+            )
+        )
+        simpo_support = (
+            alignment_support
+            if self.name == "transformers" and _version_at_least(dependencies["trl"].version, (0, 12))
+            else Capability(
+                state=SupportState.INCOMPATIBLE if self.name == "transformers" else SupportState.UNSUPPORTED,
+                reason="SimPO requires a TRL release exposing CPOTrainer with SimPO loss.",
+                requirements=["trl>=0.12"],
+            )
+        )
         return TrainingBackendCapabilities(
             name=self.name,
             display_name="Unsloth" if self.name == "unsloth" else "Transformers / TRL / PEFT",
@@ -133,14 +219,18 @@ class UnslothBackend:
             ),
             availability=availability,
             tasks={
-                task.value: (supported if task in {TaskType.CONTINUED_PRETRAIN, TaskType.FINETUNE} else unsupported)
+                task.value: (
+                    alignment_support if task == TaskType.ALIGNMENT
+                    else supported if task in {TaskType.CONTINUED_PRETRAIN, TaskType.FINETUNE}
+                    else unsupported
+                )
                 for task in TaskType
             },
             stages={
                 "from_scratch_pretraining": unsupported,
                 "continued_pretraining": supported,
                 "supervised_fine_tuning": supported,
-                "alignment": unsupported,
+                "alignment": alignment_support,
             },
             methods=methods,
             tokenizer=TokenizerCapabilities(
@@ -167,9 +257,65 @@ class UnslothBackend:
             ),
             peft=peft,
             quantization={
-                "nf4": QuantizationCapability(format="nf4", operations=["train"], support=qlora),
+                "nf4": QuantizationCapability(format="nf4", operations=["train"], support=qlora,
+                                               compute_dtypes=["auto", "bf16", "fp16", "fp32"],
+                                               storage_dtypes=["auto", "uint8", "bf16", "fp16", "fp32"],
+                                               double_quantization=True),
+                "fp4": QuantizationCapability(format="fp4", operations=["train"], support=qlora,
+                                               compute_dtypes=["auto", "bf16", "fp16", "fp32"],
+                                               storage_dtypes=["auto", "uint8", "bf16", "fp16", "fp32"],
+                                               double_quantization=True),
+                "int8": QuantizationCapability(format="int8", operations=["train"], support=qlora,
+                                                compute_dtypes=["auto", "bf16", "fp16", "fp32"]),
                 "fp16": QuantizationCapability(format="fp16", operations=["train"], support=supported),
                 "bf16": QuantizationCapability(format="bf16", operations=["train"], support=supported),
+            },
+            precision={name: supported for name in ("auto", "bf16", "fp16", "fp32")},
+            attention={
+                "auto": supported,
+                "sdpa": (
+                    supported if _version_at_least(dependencies["torch"].version, (2, 0))
+                    else Capability(state=SupportState.INCOMPATIBLE, reason="SDPA requires PyTorch 2.0 or newer.")
+                ),
+                "eager": supported,
+                "flash_attention_2": Capability(
+                    state=(SupportState.SUPPORTED if dependencies["flash-attn"].installed else SupportState.MISSING_DEPENDENCY),
+                    reason=("flash-attn is installed." if dependencies["flash-attn"].installed else "Install flash-attn to use FlashAttention 2."),
+                    requirements=["flash-attn", "CUDA"],
+                ),
+            },
+            gradient_checkpointing={
+                "auto": supported,
+                "off": supported,
+                "standard": supported,
+                "non_reentrant": supported,
+                "backend_optimized": (
+                    supported if self.name == "unsloth"
+                    else Capability(state=SupportState.UNSUPPORTED, reason="Backend-optimized checkpointing requires Unsloth.")
+                ),
+            },
+            rope={name: supported for name in ("none", "linear", "dynamic")},
+            optimizations=optimizations,
+            optional_features={
+                "bitsandbytes_optimizer": Capability(
+                    state=(SupportState.SUPPORTED if dependencies["bitsandbytes"].installed else SupportState.MISSING_DEPENDENCY),
+                    reason=("bitsandbytes optimizers are installed." if dependencies["bitsandbytes"].installed else "Install bitsandbytes to use 8-bit optimizers."),
+                    requirements=["bitsandbytes"],
+                ),
+                # Legacy consumers retain these aliases.  The optimization
+                # registry above is the authoritative source for their data.
+                **{option: optimizations[option].support for option in ("liger", "rslora", "lora_plus", "pissa", "loftq", "eva", "oft", "qoft")},
+                "objective:dpo": alignment_support,
+                "objective:ipo": alignment_support,
+                "objective:orpo": alignment_support,
+                "objective:simpo": simpo_support,
+                "objective:kto": alignment_support,
+                "objective:reward_model": alignment_support,
+                "dpo_loss:sigmoid": alignment_support,
+                **{f"reference:{strategy}": alignment_support for strategy in ("base_model", "separate_model", "adapter_disabled", "none")},
+                "dpo_loss:hinge": extended_dpo_losses,
+                "dpo_loss:robust": extended_dpo_losses,
+                "dpo_loss:exo_pair": extended_dpo_losses,
             },
             platforms=["linux", "windows", "wsl"],
             architectures=["decoder-only causal language models"],
@@ -205,8 +351,19 @@ class UnslothBackend:
                     )
             except ModelReferenceError as exc:
                 report.error(str(exc))
-        if cfg.method == Method.QLORA and not cfg.load_in_4bit:
-            report.warn("QLoRA selected but load_in_4bit is off — enabling 4-bit is recommended on 8GB.")
+        if cfg.method == Method.QLORA and cfg.quantization.mode not in {"nf4", "fp4"}:
+            report.error("QLoRA requires quantization.mode to be 'nf4' or 'fp4'.")
+        if cfg.quantization.mode in {"nf4", "fp4", "int8"} and cfg.method not in {
+            Method.LORA, Method.QLORA, Method.DORA
+        }:
+            report.error("Bitsandbytes training quantization is supported only with LoRA-family methods.")
+        if cfg.quantization.mode in {"nf4", "fp4", "int8"} and not dependency_statuses()["bitsandbytes"].installed:
+            report.error("Install bitsandbytes to use training quantization.")
+        if "8bit" in cfg.optim.optimizer and not dependency_statuses()["bitsandbytes"].installed:
+            report.error(f"Optimizer '{cfg.optim.optimizer}' requires bitsandbytes.")
+        if cfg.lora.target_strategy == "custom" and not cfg.lora.target_modules:
+            report.error("Custom LoRA targeting requires at least one target module.")
+        validate_optimization_config(cfg, self.capabilities().optimizations, report)
 
         est = self.estimate_footprint(cfg, hw)
         if est.fit == FitLevel.WONT_FIT:
@@ -230,6 +387,39 @@ class UnslothBackend:
             report.error("Completion/assistant-only loss is available only for supervised fine-tuning data.")
         if cfg.tokenizer.loss_policy != "full_sequence" and cfg.train.packing:
             report.error("Packing with masked completion/assistant loss is not supported by the current collator. Disable packing.")
+        if cfg.runtime.precision == "bf16" and not any(gpu.bf16_supported for gpu in hw.gpus):
+            report.error("BF16 precision requires a detected BF16-capable GPU.")
+        if cfg.runtime.precision == "fp16" and not any(gpu.fp16_supported for gpu in hw.gpus):
+            report.error("FP16 precision requires a detected FP16-capable GPU.")
+        if cfg.runtime.attention == "flash_attention_2":
+            capability = self.capabilities().attention["flash_attention_2"]
+            if not capability.allowed:
+                report.error(capability.reason)
+            if not hw.cuda_available:
+                report.error("FlashAttention 2 requires CUDA.")
+            if cfg.runtime.precision == "fp32":
+                report.error("FlashAttention 2 does not support the requested FP32 training precision.")
+        if cfg.runtime.gradient_checkpointing == "backend_optimized" and self.name != "unsloth":
+            report.error("Backend-optimized gradient checkpointing requires the Unsloth backend.")
+        if cfg.runtime.rope.enabled:
+            rope_capability = self.capabilities().rope.get(cfg.runtime.rope.type)
+            if rope_capability is None or not rope_capability.allowed:
+                reason = rope_capability.reason if rope_capability else "The backend has no verified implementation."
+                report.error(f"RoPE policy '{cfg.runtime.rope.type}' is unavailable: {reason}")
+        if cfg.task == TaskType.ALIGNMENT:
+            objective = self.capabilities().optional_features.get(f"objective:{cfg.alignment.objective}")
+            if objective is None or not objective.allowed:
+                report.error(objective.reason if objective else f"Objective '{cfg.alignment.objective}' is unsupported.")
+            if cfg.train.packing:
+                report.error("Preference alignment does not support sequence packing in the shared trainer.")
+            if cfg.alignment.objective == "reward_model" and cfg.runtime.rope.enabled:
+                report.error("The reward-model loader does not apply RoPE overrides; disable RoPE extension.")
+            if cfg.alignment.objective == "dpo":
+                loss = self.capabilities().optional_features.get(
+                    f"dpo_loss:{cfg.alignment.dpo_loss_variant}"
+                )
+                if loss is None or not loss.allowed:
+                    report.error(loss.reason if loss else "The requested DPO loss is unsupported.")
         return report
 
     def estimate_footprint(self, cfg: RunConfig, hw: HardwareProfile) -> MemoryEstimate:
@@ -281,8 +471,32 @@ class UnslothBackend:
             out.put(_SENTINEL)
 
     def _train(self, cfg: RunConfig, ctx: RunContext, emit) -> None:
+        if cfg.task == TaskType.ALIGNMENT:
+            from app.train_entry.alignment import PreferenceTrainer
+
+            PreferenceTrainer(
+                cfg,
+                ctx,
+                emit,
+                load_trainable_model=self._load_trainable_model,
+                load_reward_model=self._load_reward_model,
+                callback_factory=_StreamCallback,
+            ).run()
+            return
         model, tokenizer = self._load_trainable_model(cfg, emit)
         import torch
+
+        from app.train_entry.module_selection import parameter_summary
+
+        trainability = parameter_summary(model)
+        emit(ProfileEvent(name="trainability", values=trainability.as_dict()))
+        emit(LogEvent(
+            message=(
+                f"Trainability: {trainability.trainable_parameters:,} / "
+                f"{trainability.total_parameters:,} parameters "
+                f"({trainability.trainable_percentage:.4f}%)."
+            )
+        ))
 
         dataset, pretokenized = self._load_dataset(cfg, tokenizer, emit)
 
@@ -306,13 +520,25 @@ class UnslothBackend:
             save_steps=cfg.train.save_steps,
             save_strategy="steps",
             seed=cfg.train.seed,
-            bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
-            fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
+            bf16=(cfg.runtime.precision == "bf16" or (
+                cfg.runtime.precision == "auto" and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+            )),
+            fp16=(cfg.runtime.precision == "fp16" or (
+                cfg.runtime.precision == "auto" and torch.cuda.is_available() and not torch.cuda.is_bf16_supported()
+            )),
             packing=cfg.train.packing,
             report_to="none",
         )
         # trl renamed max_seq_length → max_length (~0.20); support both.
         sft_params = inspect.signature(SFTConfig.__init__).parameters
+        if cfg.runtime.use_liger:
+            if "use_liger_kernel" not in sft_params:
+                raise RuntimeError("The installed TRL/Transformers runtime does not expose Liger support.")
+            config_kwargs["use_liger_kernel"] = True
+        if cfg.runtime.neftune_noise_alpha is not None:
+            if "neftune_noise_alpha" not in sft_params:
+                raise RuntimeError("The installed TRL/Transformers runtime does not expose NEFTune support.")
+            config_kwargs["neftune_noise_alpha"] = cfg.runtime.neftune_noise_alpha
         if not pretokenized:
             config_kwargs["dataset_text_field"] = "text"
             if "dataset_kwargs" in sft_params:
@@ -339,6 +565,11 @@ class UnslothBackend:
             trainer_kwargs["data_collator"] = DataCollatorForSeq2Seq(
                 tokenizer=tokenizer, model=model, padding=True, label_pad_token_id=-100,
             )
+        from app.train_entry.optimization_runtime import trainer_optimizers
+
+        optimizers = trainer_optimizers(model, cfg)
+        if optimizers is not None:
+            trainer_kwargs["optimizers"] = optimizers
         trainer = SFTTrainer(
             model=model,
             train_dataset=dataset,
@@ -380,7 +611,7 @@ class UnslothBackend:
         # Qwen/Llama model loaders.
         fast_language_model = None
         unsloth_import_error = None
-        if cfg.backend != "transformers" and cfg.method != Method.FULL:
+        if cfg.backend != "transformers" and cfg.method in _ADAPTER_METHODS:
             try:
                 from unsloth import FastLanguageModel
 
@@ -414,12 +645,32 @@ class UnslothBackend:
         model_ref = resolved.load_ref
         emit(LogEvent(message=f"Loading base model {cfg.base_model} (4bit={cfg.load_in_4bit})..."))
         try:
-            if cfg.backend == "transformers" or cfg.method == Method.FULL or resolved.kind == "adapter":
+            if cfg.backend == "transformers" or cfg.method not in _ADAPTER_METHODS or resolved.kind == "adapter":
                 raise NotImplementedError("Using the standard Transformers engine for this configuration.")
             if unsloth_import_error is not None:
                 raise unsloth_import_error
             if fast_language_model is None:
                 raise RuntimeError("Unsloth did not provide FastLanguageModel.")
+            if cfg.quantization.mode not in {"none", "nf4"}:
+                raise NotImplementedError(
+                    f"Unsloth profile does not expose explicit {cfg.quantization.mode} loading; using native Transformers."
+                )
+            if cfg.runtime.precision != "auto":
+                raise NotImplementedError(
+                    "Explicit precision selection is handled by the native Transformers engine."
+                )
+            if cfg.runtime.attention != "auto":
+                raise NotImplementedError(
+                    "Explicit attention selection is handled by the native Transformers engine."
+                )
+            if cfg.runtime.rope.enabled:
+                raise NotImplementedError(
+                    "Explicit RoPE scaling is handled by the native Transformers engine."
+                )
+            if cfg.runtime.gradient_checkpointing in {"standard", "non_reentrant"}:
+                raise NotImplementedError(
+                    "The selected checkpointing mode is handled by the native Transformers engine."
+                )
 
             model, tokenizer = fast_language_model.from_pretrained(
                 model_name=model_ref,
@@ -428,12 +679,20 @@ class UnslothBackend:
                 load_in_4bit=cfg.load_in_4bit and cfg.method != Method.FULL,
                 **common,
             )
-            if cfg.method != Method.FULL:
+            if cfg.method in _ADAPTER_METHODS:
+                from app.train_entry.module_selection import discover_lora_targets
+
+                targets = discover_lora_targets(model, cfg.lora)
+                emit(ProfileEvent(name="adapter_targets", values={
+                    "strategy": targets.strategy,
+                    "modules": list(targets.matched_modules),
+                    "count": len(targets.matched_modules),
+                }))
                 emit(LogEvent(message=f"Attaching {cfg.method.value.upper()} adapters with Unsloth (r={cfg.lora.r})..."))
                 model = fast_language_model.get_peft_model(
                     model,
                     r=cfg.lora.r,
-                    target_modules=_unsloth_target_modules(cfg.lora.target_modules),
+                    target_modules=list(targets.matched_modules),
                     lora_alpha=cfg.lora.alpha,
                     lora_dropout=cfg.lora.dropout,
                     bias="none",
@@ -451,7 +710,7 @@ class UnslothBackend:
                 message=f"Unsloth could not load this model ({unsloth_error}). Falling back to Transformers + PEFT.",
             ))
 
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         from app.config import get_settings
 
@@ -470,14 +729,43 @@ class UnslothBackend:
             tokenizer = AutoTokenizer.from_pretrained(resolved.base_model, **base_common)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        load_kwargs = {"dtype": "auto", **common}
+        dtype = "auto"
+        if cfg.runtime.precision == "fp32":
+            dtype = torch.float32
+        elif cfg.runtime.precision == "fp16":
+            dtype = torch.float16
+        elif cfg.runtime.precision == "bf16":
+            dtype = torch.bfloat16
+        load_kwargs = {"torch_dtype": dtype, **common}
+        if cfg.runtime.attention != "auto":
+            load_kwargs["attn_implementation"] = cfg.runtime.attention
         if torch.cuda.is_available():
             load_kwargs["device_map"] = {"": 0}
-        if cfg.load_in_4bit and cfg.method != Method.FULL:
-            if not torch.cuda.is_available():
-                raise RuntimeError("QLoRA requires a CUDA GPU.")
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+        if cfg.runtime.rope.enabled:
+            config_ref = resolved.base_model if resolved.kind == "adapter" else model_ref
+            if not config_ref:
+                raise RuntimeError("Could not resolve a base model configuration for RoPE scaling.")
+            model_config = AutoConfig.from_pretrained(config_ref, **base_common)
+            if not hasattr(model_config, "rope_scaling"):
+                raise RuntimeError("This model configuration does not expose RoPE scaling.")
+            model_config.rope_scaling = {
+                "rope_type": cfg.runtime.rope.type,
+                "factor": cfg.runtime.rope.factor,
+            }
+            load_kwargs["config"] = model_config
+            emit(LogEvent(message=(
+                f"Applying explicit {cfg.runtime.rope.type} RoPE scaling "
+                f"with factor {cfg.runtime.rope.factor:g}."
+            )))
+        quant_mode = cfg.quantization.mode
+        if quant_mode in {"nf4", "fp4", "int8"}:
+            from app.train_entry.quantization import bitsandbytes_config
+
+            load_kwargs["quantization_config"] = bitsandbytes_config(
+                cfg,
+                torch,
+                BitsAndBytesConfig,
+            )
 
         if resolved.kind == "adapter":
             from peft import PeftModel
@@ -486,7 +774,7 @@ class UnslothBackend:
             base_load_kwargs = {**load_kwargs, **base_common}
             base_load_kwargs.pop("revision", None)
             base = AutoModelForCausalLM.from_pretrained(resolved.base_model, **base_load_kwargs)
-            if cfg.load_in_4bit:
+            if quant_mode != "none":
                 from peft import prepare_model_for_kbit_training
                 base = prepare_model_for_kbit_training(base, use_gradient_checkpointing=cfg.gradient_checkpointing)
             model = PeftModel.from_pretrained(
@@ -505,10 +793,20 @@ class UnslothBackend:
         else:
             model = AutoModelForCausalLM.from_pretrained(model_ref, **load_kwargs)
 
-        if cfg.method != Method.FULL and resolved.kind != "adapter":
+        if cfg.method in _ADAPTER_METHODS and resolved.kind != "adapter":
             from peft import LoraConfig, get_peft_model
             from peft import TaskType as PeftTaskType
-            if cfg.load_in_4bit:
+
+            from app.train_entry.module_selection import discover_lora_targets
+            from app.train_entry.optimization_runtime import lora_config_kwargs
+
+            targets = discover_lora_targets(model, cfg.lora)
+            emit(ProfileEvent(name="adapter_targets", values={
+                "strategy": targets.strategy,
+                "modules": list(targets.matched_modules),
+                "count": len(targets.matched_modules),
+            }))
+            if quant_mode != "none":
                 from peft import prepare_model_for_kbit_training
                 model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=cfg.gradient_checkpointing)
 
@@ -517,15 +815,146 @@ class UnslothBackend:
                 r=cfg.lora.r,
                 lora_alpha=cfg.lora.alpha,
                 lora_dropout=cfg.lora.dropout,
-                target_modules=cfg.lora.target_modules or "all-linear",
+                target_modules=list(targets.matched_modules),
                 use_dora=(cfg.method == Method.DORA) or cfg.lora.use_dora,
                 use_rslora=cfg.lora.use_rslora,
+                **lora_config_kwargs(cfg),
             ))
+        elif cfg.method == Method.FREEZE:
+            if resolved.kind == "adapter":
+                raise ValueError("Freeze tuning requires a base model, not an existing PEFT adapter.")
+            from app.train_entry.module_selection import apply_freeze_policy
+
+            summary, selected = apply_freeze_policy(model, cfg.freeze)
+            emit(ProfileEvent(name="freeze_targets", values={
+                **summary.as_dict(), "parameters": list(selected), "count": len(selected),
+            }))
+        elif cfg.method == Method.FULL:
+            for parameter in model.parameters():
+                parameter.requires_grad_(True)
+
         model.config.use_cache = False
         if cfg.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
-            model.gradient_checkpointing_enable()
+            kwargs = ({"gradient_checkpointing_kwargs": {"use_reentrant": False}}
+                      if cfg.runtime.gradient_checkpointing == "non_reentrant" else {})
+            model.gradient_checkpointing_enable(**kwargs)
             if hasattr(model, "enable_input_require_grads"):
                 model.enable_input_require_grads()
+        return model, tokenizer
+
+    def _load_reward_model(self, cfg: RunConfig, emit):
+        """Load a scalar sequence classifier for pairwise reward training.
+
+        Reward heads deliberately use the native Transformers/PEFT path even
+        when the optional Unsloth package is installed.
+        """
+        import torch
+        from transformers import (
+            AutoModelForSequenceClassification,
+            AutoTokenizer,
+            BitsAndBytesConfig,
+        )
+
+        from app.config import get_settings
+        from app.integrations.hf_hub import _token
+
+        settings = get_settings()
+        common = {
+            "token": _token(),
+            "cache_dir": str(settings.hf_cache_dir),
+            "trust_remote_code": settings.trust_remote_code,
+        }
+        if cfg.revision:
+            common["revision"] = cfg.revision
+        resolved = resolve_model_ref(cfg.base_model)
+        if resolved.kind == "scratch":
+            raise ValueError("Scratch checkpoints cannot be used as reward-model bases.")
+        if resolved.kind == "adapter":
+            from peft import PeftConfig
+            from peft import TaskType as PeftTaskType
+
+            adapter_config = PeftConfig.from_pretrained(resolved.adapter_path, **common)
+            if adapter_config.task_type != PeftTaskType.SEQ_CLS:
+                raise ValueError("Reward adapter continuation requires a saved SEQ_CLS adapter; merge a causal-LM adapter before reward training.")
+        tokenizer_ref = resolved.adapter_path or resolved.load_ref
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_ref, **common)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        load_ref = resolved.base_model if resolved.kind == "adapter" else resolved.load_ref
+        load_kwargs: dict[str, Any] = {**common, "num_labels": 1}
+        if resolved.kind == "adapter":
+            load_kwargs.pop("revision", None)
+        if cfg.runtime.precision == "fp32":
+            load_kwargs["torch_dtype"] = torch.float32
+        elif cfg.runtime.precision == "fp16":
+            load_kwargs["torch_dtype"] = torch.float16
+        elif cfg.runtime.precision == "bf16":
+            load_kwargs["torch_dtype"] = torch.bfloat16
+        else:
+            load_kwargs["torch_dtype"] = "auto"
+        if cfg.runtime.attention != "auto":
+            load_kwargs["attn_implementation"] = cfg.runtime.attention
+        if torch.cuda.is_available():
+            load_kwargs["device_map"] = {"": 0}
+        if cfg.quantization.mode != "none":
+            from app.train_entry.quantization import bitsandbytes_config
+
+            load_kwargs["quantization_config"] = bitsandbytes_config(cfg, torch, BitsAndBytesConfig)
+        model = AutoModelForSequenceClassification.from_pretrained(load_ref, **load_kwargs)
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.config.problem_type = "regression"
+        if resolved.kind == "adapter":
+            from peft import PeftModel
+
+            assert resolved.adapter_path
+            if cfg.quantization.mode != "none":
+                from peft import prepare_model_for_kbit_training
+
+                model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=cfg.gradient_checkpointing)
+            model = PeftModel.from_pretrained(
+                model, resolved.adapter_path, is_trainable=True, token=_token(), revision=cfg.revision,
+            )
+            if cfg.method == Method.FULL:
+                model = model.merge_and_unload()
+                model.requires_grad_(True)
+        elif cfg.method in _ADAPTER_METHODS:
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+            from peft import TaskType as PeftTaskType
+
+            from app.train_entry.module_selection import discover_lora_targets
+            from app.train_entry.optimization_runtime import lora_config_kwargs
+
+            # PEFT SEQ_CLS trains/saves these heads in full; targeting them with
+            # LoRA as well creates incompatible nested adapter wrappers.
+            targets = discover_lora_targets(model, cfg.lora, excluded_modules=("classifier", "score"))
+            emit(ProfileEvent(name="adapter_targets", values={
+                "strategy": targets.strategy,
+                "modules": list(targets.matched_modules),
+                "count": len(targets.matched_modules),
+            }))
+            if cfg.quantization.mode != "none":
+                model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=cfg.gradient_checkpointing)
+            model = get_peft_model(model, LoraConfig(
+                task_type=PeftTaskType.SEQ_CLS,
+                r=cfg.lora.r,
+                lora_alpha=cfg.lora.alpha,
+                lora_dropout=cfg.lora.dropout,
+                target_modules=list(targets.matched_modules),
+                use_dora=(cfg.method == Method.DORA) or cfg.lora.use_dora,
+                use_rslora=cfg.lora.use_rslora,
+                **lora_config_kwargs(cfg),
+            ))
+        else:
+            for parameter in model.parameters():
+                parameter.requires_grad_(True)
+        model.config.use_cache = False
+        if cfg.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
+            kwargs = ({"gradient_checkpointing_kwargs": {"use_reentrant": False}}
+                      if cfg.runtime.gradient_checkpointing == "non_reentrant" else {})
+            model.gradient_checkpointing_enable(**kwargs)
+            if hasattr(model, "enable_input_require_grads"):
+                model.enable_input_require_grads()
+        emit(LogEvent(message=f"Loaded scalar reward model from {cfg.base_model}."))
         return model, tokenizer
 
     # -------------------------------------------------------------------
@@ -553,11 +982,16 @@ class UnslothBackend:
 
             from datasets import Dataset as HFDataset
 
-            from app.datasets.adapters import canonicalize
             from app.datasets.validate import _iter_records
             eos = tokenizer.eos_token or ""
-            return HFDataset.from_generator(lambda: ({"text": canonicalize(row).content_text() + eos}
-                for _, row in _iter_records(Path(path), ds_row.fmt) if isinstance(row, dict))), False
+
+            def raw_rows():
+                for line, row in _iter_records(Path(path), ds_row.fmt):
+                    if not isinstance(row, dict):
+                        raise ValueError(f"Raw corpus row {line} is not an object.")
+                    yield {"text": _continued_pretraining_text(row, line, eos)}
+
+            return HFDataset.from_generator(raw_rows), False
 
         # Instruction/chat: build a 'text' column via the model's chat template.
         if ds_row.fmt in ("jsonl", "json"):
@@ -609,11 +1043,12 @@ class _StreamCallback:
     other ``on_*`` hook the CallbackHandler invokes.
     """
 
-    def __init__(self, ctx: RunContext, emit) -> None:
+    def __init__(self, ctx: RunContext, emit, metric_normalizer=None) -> None:
         self.ctx = ctx
         self.emit = emit
         self.last_step = 0
         self._t0 = time.time()
+        self.metric_normalizer = metric_normalizer
 
     def __getattr__(self, name: str):
         if name.startswith("on_"):
@@ -625,6 +1060,8 @@ class _StreamCallback:
             return control
         self.last_step = int(state.global_step)
         metrics = {k: v for k, v in logs.items() if isinstance(v, (int, float))}
+        if self.metric_normalizer is not None:
+            metrics = self.metric_normalizer(metrics)
         import torch
         metrics["elapsed_seconds"] = round(time.time() - self._t0, 1)
         if torch.cuda.is_available():

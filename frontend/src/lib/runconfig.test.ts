@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultForm, toPayload, toPretrainPayload, type RunForm } from "./runconfig";
+import { defaultForm, formFromConfig, toPayload, toPretrainPayload, type RunForm } from "./runconfig";
 import { readWorkflow, writeWorkflow } from "./workflow";
 
 describe("runconfig and workflow defensive hydration", () => {
@@ -82,7 +82,113 @@ describe("runconfig and workflow defensive hydration", () => {
       max_steps: 1000,
       save_steps: 200,
       logging_steps: 10,
+      tokenizer_mode: "train",
+      tokenizer_source: "",
     });
     expect(payload.output_name).toBe("my-scratch-llm");
+    expect((payload.tokenizer as any).mode).toBe("train");
+  });
+
+  it("preserves an imported scratch tokenizer source", () => {
+    const payload = toPretrainPayload({
+      output_name: "scratch-import",
+      dataset_id: 1,
+      vocab_size: 8192,
+      n_layers: 6,
+      n_heads: 6,
+      n_embd: 384,
+      block_size: 256,
+      dropout: 0.1,
+      learning_rate: 3e-4,
+      per_device_batch_size: 8,
+      max_steps: 1000,
+      save_steps: 200,
+      logging_steps: 10,
+      tokenizer_mode: "import",
+      tokenizer_source: " C:\\models\\tokenizer ",
+    });
+    expect(payload.tokenizer).toEqual({ mode: "import", source: "C:\\models\\tokenizer" });
+  });
+
+  it("round-trips Phase B method and runtime policy through RunConfig", () => {
+    const form = defaultForm({
+      backend: "transformers",
+      method: "freeze",
+      freeze_last_n_layers: 3,
+      freeze_embeddings: true,
+      precision: "bf16",
+      attention: "sdpa",
+      checkpointing_mode: "non_reentrant",
+      rope_enabled: true,
+      rope_factor: 2,
+    });
+    const payload = toPayload(form);
+    expect((payload.freeze as any).last_n_layers).toBe(3);
+    expect((payload.quantization as any).mode).toBe("none");
+    expect((payload.runtime as any).attention).toBe("sdpa");
+    const hydrated = formFromConfig(payload);
+    expect(hydrated.method).toBe("freeze");
+    expect(hydrated.freeze_last_n_layers).toBe(3);
+    expect(hydrated.precision).toBe("bf16");
+    expect(hydrated.rope_enabled).toBe(true);
+  });
+
+  it("normalizes reference-free alignment objectives in the shared payload", () => {
+    const payload = toPayload(defaultForm({
+      task: "alignment",
+      alignment_objective: "simpo",
+      reference_strategy: "base_model",
+    }));
+    expect((payload.alignment as any).reference.strategy).toBe("none");
+    expect((payload.alignment as any).objective).toBe("simpo");
+  });
+
+  it("round-trips alignment objective and reference lineage", () => {
+    const payload = toPayload(defaultForm({
+      task: "alignment",
+      alignment_objective: "dpo",
+      reference_strategy: "separate_model",
+      reference_model: "org/reference",
+      reference_revision: "abc123",
+    }));
+    const hydrated = formFromConfig(payload);
+    expect(hydrated.alignment_objective).toBe("dpo");
+    expect(hydrated.reference_strategy).toBe("separate_model");
+    expect(hydrated.reference_model).toBe("org/reference");
+    expect(hydrated.reference_revision).toBe("abc123");
+  });
+
+  it("keeps DPO loss settings objective-specific", () => {
+    const payload = toPayload(defaultForm({
+      task: "alignment",
+      alignment_objective: "dpo",
+      alignment_dpo_loss_variant: "robust",
+      alignment_label_smoothing: 0.1,
+    }));
+    expect((payload.alignment as any).dpo_loss_variant).toBe("robust");
+    expect((payload.alignment as any).label_smoothing).toBe(0.1);
+  });
+
+  it("normalizes reward models to reference-free alignment", () => {
+    const payload = toPayload(defaultForm({
+      task: "alignment",
+      alignment_objective: "reward_model",
+      reference_strategy: "separate_model",
+      reference_model: "org/reference",
+    }));
+    expect((payload.alignment as any).reference).toEqual({
+      strategy: "none",
+      model: null,
+      revision: null,
+    });
+  });
+
+  it("drops inactive DPO settings when changing objectives", () => {
+    const payload = toPayload(defaultForm({
+      task: "alignment", alignment_objective: "ipo",
+      alignment_dpo_loss_variant: "robust", alignment_label_smoothing: 0.1,
+    }));
+    expect((payload.alignment as any).dpo_loss_variant).toBe("sigmoid");
+    expect((payload.alignment as any).label_smoothing).toBe(0);
   });
 });

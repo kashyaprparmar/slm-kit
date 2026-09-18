@@ -12,14 +12,15 @@ import type { Capability, SupportState } from "@/lib/types";
 
 const CUSTOM = "__custom__";
 
-export function BaseModelPicker({ value = "", onChange, revision }: { value?: string; onChange: (v: string) => void; revision?: string }) {
+export function BaseModelPicker({ value = "", onChange, revision, allowRewardModels = false }: { value?: string; onChange: (v: string) => void; revision?: string; allowRewardModels?: boolean }) {
   // Past runs trained in this app — selectable as a base for further training/testing.
   const local = useQuery({ queryKey: ["model-options"], queryFn: api.modelOptions, staleTime: 30_000 });
   const trained = useMemo(
     () =>
       (local.data?.models ?? [])
+        .filter((model) => allowRewardModels || model.model_category !== "reward_model")
         .map((model) => ({ repo: model.ref, label: model.label, kind: model.kind })),
-    [local.data],
+    [allowRewardModels, local.data],
   );
 
   const families = useMemo(() => {

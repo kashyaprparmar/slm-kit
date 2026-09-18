@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
-import sys
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -16,15 +13,24 @@ from sqlmodel import Session, select
 from app.config import get_settings
 from app.core.deployment import manager as deployment_manager
 from app.core.eval_manager import manager as eval_manager
-from app.core.log_capture import append_log_line, read_log_tail
+from app.core.export_jobs import manager as export_jobs
+from app.core.log_capture import read_log_tail
 from app.core.logging_config import get_logger
 from app.core.queue import queue
-from app.core.resources import ResourceBusy, gpu
-from app.core.ws import hub
+from app.core.resources import ResourceBusy
 from app.db.models import ModelArtifact, Run
 from app.db.session import engine
+from app.export_contracts import ExportRequest, export_capabilities
 from app.integrations import gguf, hf_hub, vllm_serve
-from app.model_refs import ModelReferenceError, model_options, resolve_model_ref, run_ref
+from app.integrations.hf_hub import generate_model_card  # noqa: F401 -- retained public helper
+from app.model_refs import (
+    ModelReferenceError,
+    model_options,
+    normalize_artifact_kind,
+    resolve_model_ref,
+    run_ref,
+)
+from app.models.quantization_registry import quantization_capabilities
 
 router = APIRouter(prefix="/api/registry", tags=["registry"])
 _settings = get_settings()
@@ -42,6 +48,8 @@ def capabilities():
         "hf_token_set": bool(_settings.hf_token),
         "quant_types": gguf.QUANT_TYPES,
         "deployment": deployment_manager.status(),
+        "quantization": {name: cap.model_dump(mode="json") for name, cap in quantization_capabilities().items()},
+        "export_targets": ["adapter", "huggingface", "merged", "quantized", "gguf", "ollama", "hub"],
     }
 
 
@@ -51,35 +59,26 @@ def available_model_options():
     return {"models": model_options()}
 
 
-def generate_model_card(run: Run) -> str:
-    cfg = run.config or {}
-    metrics = run.metrics or {}
-    hw = run.hardware or {}
-    lines = [
-        f"# {run.name}",
-        "",
-        "Model produced with **SLM Kit**.",
-        "",
-        "## Training summary",
-        f"- **Task:** {run.task}",
-        f"- **Method:** {run.method}",
-        f"- **Base model:** `{run.base_model}`",
-        f"- **Backend:** {run.backend}",
-        f"- **Trained:** {run.finished_at or run.started_at}",
-    ]
-    if hw.get("gpu_name"):
-        lines.append(f"- **Hardware:** {hw.get('gpu_name')} ({hw.get('vram_total_mb')} MB VRAM)")
-    lines += ["", "## Hyperparameters", "```json", _pretty(cfg), "```"]
-    if metrics:
-        lines += ["", "## Final metrics", "```json", _pretty(metrics), "```"]
-    lines += ["", "_Generated automatically from the run's stored metadata._"]
-    return "\n".join(lines)
+@router.post("/exports", status_code=202)
+async def start_export(body: ExportRequest):
+    try:
+        return await export_jobs.start(body)
+    except (ValueError, ResourceBusy) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
-def _pretty(obj) -> str:
-    import json
+@router.get("/exports/{job_id}")
+def export_status(job_id: int):
+    with Session(engine) as db:
+        artifact = db.get(ModelArtifact, job_id)
+        if not artifact or not (artifact.meta or {}).get("export_job"):
+            raise HTTPException(404, "Export job not found.")
+        return {"artifact": artifact.model_dump(), "logs": export_jobs.logs(job_id)}
 
-    return json.dumps(obj, indent=2, default=str)
+
+@router.post("/exports/{job_id}/cancel")
+async def cancel_export(job_id: int):
+    return {"cancelled": await export_jobs.cancel(job_id)}
 
 
 @router.get("/local")
@@ -112,7 +111,21 @@ def local_models():
         }
         for r in done_runs
     ]
-    return {"artifacts": artifacts, "unpublished_runs": unregistered, "lineage": lineage}
+    artifact_rows = []
+    for artifact in artifacts:
+        category = normalize_artifact_kind(artifact.kind)
+        capabilities = (
+            ["pairwise_accuracy", "chosen_score", "rejected_score", "reward_margin"]
+            if category == "reward_model"
+            else ["generation", "perplexity"] if category != "reference_model" else ["preference_log_probability"]
+        )
+        artifact_rows.append({
+            **artifact.model_dump(),
+            "model_category": category,
+            "evaluation_capabilities": capabilities,
+            "export_capabilities": {name: cap.model_dump(mode="json") for name, cap in export_capabilities(artifact).items()},
+        })
+    return {"artifacts": artifact_rows, "unpublished_runs": unregistered, "lineage": lineage}
 
 
 @router.get("/hf")
@@ -126,8 +139,11 @@ def delete_artifact(artifact_id: int):
         artifact = db.get(ModelArtifact, artifact_id)
         if not artifact:
             raise HTTPException(404, "Model artifact not found.")
-        if artifact.status == "quantizing":
-            raise HTTPException(409, "Wait for GGUF export to finish before deleting this artifact.")
+        if artifact.status in {"quantizing", "merging", "exporting"}:
+            raise HTTPException(409, "Finish or cancel the export before deleting this artifact.")
+        jobs = db.exec(select(ModelArtifact).where(ModelArtifact.status == "exporting")).all()
+        if any((job.meta or {}).get("lineage", {}).get("source_artifact_id") == artifact_id for job in jobs):
+            raise HTTPException(409, "An active export references this source artifact.")
         if deployment_manager.active and deployment_manager.status().get("model_ref") == artifact.local_path:
             raise HTTPException(409, "Stop the model server before deleting this artifact.")
         local_path = Path(artifact.local_path).resolve() if artifact.local_path else None
@@ -151,33 +167,24 @@ class PublishBody(BaseModel):
 
 
 @router.post("/publish")
-def publish(body: PublishBody):
-    with Session(engine) as db:
-        run = db.get(Run, body.run_id)
-        if not run:
-            raise HTTPException(404, "Run not found")
-        if not run.output_dir:
-            raise HTTPException(400, "Run has no output directory to publish.")
-        output = f"{run.output_dir}/output"
-        card = generate_model_card(run)
+async def publish(body: PublishBody):
     try:
-        url = hf_hub.publish_model(output, body.repo_id, body.private, card)
-    except RuntimeError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"HF upload failed: {e}")
-
-    with Session(engine) as db:
-        run = db.get(Run, body.run_id)
-        run.hf_repo = url
-        db.add(run)
-        db.add(ModelArtifact(
-            name=run.name, kind=run.task, run_id=run.id, base_model=run.base_model,
-            local_path=output, hf_repo=url, published=True,
-            meta={"published_at": datetime.utcnow().isoformat()},
-        ))
-        db.commit()
-    return {"hf_repo": url}
+        result = await export_jobs.start(ExportRequest(artifact_id=_export_source(run_ref(body.run_id)),
+            target="hub", repo_id=body.repo_id, private=body.private))
+        task = export_jobs.tasks.get(result["artifact_id"])
+        if task:
+            await asyncio.shield(task)
+        with Session(engine) as db:
+            artifact = db.get(ModelArtifact, result["artifact_id"])
+            if artifact.status != "ready":
+                raise HTTPException(502, artifact.error or "Hub export failed; inspect export job logs.")
+            run = db.get(Run, body.run_id)
+            run.hf_repo = artifact.hf_repo
+            db.add(run)
+            db.commit()
+            return {"hf_repo": artifact.hf_repo, "artifact_id": artifact.id}
+    except (ValueError, ModelReferenceError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 class ImportBody(BaseModel):
@@ -291,6 +298,8 @@ async def deploy(body: DeployBody):
         resolved = resolve_model_ref(body.model_ref)
     except ModelReferenceError as exc:
         raise HTTPException(400, str(exc))
+    if not resolved.deployable:
+        raise HTTPException(422, f"{resolved.model_category.replace('_', ' ').title()} artifacts cannot be deployed for text generation.")
     if queue.current_id is not None:
         raise HTTPException(409, "GPU is busy with a training run.")
     current = eval_manager.current()
@@ -324,46 +333,38 @@ class MergeBody(BaseModel):
     name: str | None = None
 
 
+def _export_source(model_ref: str) -> int:
+    resolved = resolve_model_ref(model_ref)
+    if not resolved.local_path:
+        raise HTTPException(422, "Export requires a local artifact. Import the model first.")
+    with Session(engine) as db:
+        existing = db.exec(select(ModelArtifact).where(ModelArtifact.local_path == resolved.local_path, ModelArtifact.status == "ready")).first()
+        if existing:
+            return existing.id
+        artifact = ModelArtifact(name=resolved.label, kind=resolved.artifact_kind or resolved.kind,
+            local_path=resolved.local_path, run_id=resolved.run_id, base_model=resolved.base_model)
+        db.add(artifact)
+        db.commit()
+        db.refresh(artifact)
+        return artifact.id
+
+
 @router.post("/merge", status_code=202)
 async def merge_adapter(body: MergeBody):
     try:
         resolved = resolve_model_ref(body.model_ref)
-    except ModelReferenceError as exc:
-        raise HTTPException(400, str(exc))
-    if resolved.kind != "adapter":
-        raise HTTPException(422, "Only a PEFT/LoRA adapter can be merged. Full models are already standalone.")
-    from app.serving.providers import external_gpu_owner
-
-    owner = await external_gpu_owner()
-    if owner:
-        raise HTTPException(409, f"GPU is already in use by external provider '{owner}'. Stop it before merging an adapter.")
-    try:
-        lease = gpu.acquire("merging", body.model_ref)
-    except ResourceBusy as exc:
-        raise HTTPException(409, str(exc))
-    try:
-        with Session(engine) as db:
-            artifact = ModelArtifact(
-                name=body.name or f"{resolved.label}-merged",
-                kind="merged",
-                run_id=resolved.run_id,
-                base_model=resolved.base_model,
-                status="merging",
-                meta={"source_ref": body.model_ref},
-            )
-            db.add(artifact)
-            db.commit()
-            db.refresh(artifact)
-            artifact_id = artifact.id
-    except BaseException:
-        gpu.release(lease)
-        raise
-    task = asyncio.create_task(_run_merge(artifact_id, body.model_ref, lease))
-    _BACKGROUND_TASKS.add(task)
-    _MERGE_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
-    task.add_done_callback(_MERGE_TASKS.discard)
-    return {"artifact_id": artifact_id, "status": "merging"}
+        if resolved.kind != "adapter" or resolved.model_category == "reward_model":
+            raise ValueError("Merge requires a causal-LM PEFT adapter.")
+        result = await export_jobs.start(ExportRequest(artifact_id=_export_source(body.model_ref), target="merged"))
+        if body.name:
+            with Session(engine) as db:
+                artifact = db.get(ModelArtifact, result["artifact_id"])
+                artifact.name = body.name
+                db.add(artifact)
+                db.commit()
+        return result
+    except (ValueError, ModelReferenceError, ResourceBusy) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 class QuantizeBody(BaseModel):
@@ -374,145 +375,20 @@ class QuantizeBody(BaseModel):
 
 @router.post("/quantize", status_code=202)
 async def quantize(body: QuantizeBody):
-    if body.quant_type not in gguf.QUANT_TYPES:
-        raise HTTPException(400, f"Unknown quant type. Choose one of {gguf.QUANT_TYPES}.")
-    with Session(engine) as db:
-        run = db.get(Run, body.run_id) if body.run_id else None
-        source_artifact = db.get(ModelArtifact, body.artifact_id) if body.artifact_id else None
-        if not run and not source_artifact:
-            raise HTTPException(404, "Choose a completed run or merged artifact to quantize.")
-        if source_artifact:
-            if source_artifact.kind not in {"merged", "pretrain"} or source_artifact.status != "ready" or not source_artifact.local_path:
-                raise HTTPException(422, "GGUF export requires a ready full or merged model artifact.")
-            src = source_artifact.local_path
-            source_name = source_artifact.name
-            source_run_id = source_artifact.run_id
-            source_base = source_artifact.base_model
-        else:
-            assert run is not None
-            if run.method != "full" and run.task != "pretrain":
-                raise HTTPException(422, "Merge this adapter first, then export the merged artifact to GGUF.")
-            if not run.output_dir:
-                raise HTTPException(400, "Run has no output directory to quantize.")
-            src = f"{run.output_dir}/output"
-            source_name = run.name
-            source_run_id = run.id
-            source_base = run.base_model
-        art = ModelArtifact(
-            name=f"{source_name}-{body.quant_type}.gguf", kind="gguf", run_id=source_run_id,
-            base_model=source_base, status="quantizing",
-            meta={"quant_type": body.quant_type, "source": src},
-        )
-        db.add(art)
-        db.commit()
-        db.refresh(art)
-        art_id = art.id
-
-    # Non-GPU, potentially long: run off the request path. Not on the GPU queue.
-    # Held in _BACKGROUND_TASKS (not a bare asyncio.create_task) — an
-    # unreferenced task can be garbage collected mid-run.
-    task = asyncio.create_task(_run_quantize(art_id, src, body.quant_type))
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
-    return {"artifact_id": art_id, "status": "quantizing"}
-
-
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
-_MERGE_TASKS: set[asyncio.Task] = set()
+    try:
+        source_id = body.artifact_id or (_export_source(run_ref(body.run_id)) if body.run_id else None)
+        if not source_id:
+            raise ValueError("Choose a completed run or artifact.")
+        return await export_jobs.start(ExportRequest(artifact_id=source_id, target="gguf", quant_type=body.quant_type))
+    except (ValueError, ModelReferenceError, ResourceBusy) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 async def stop_background_tasks() -> None:
-    tasks = list(_MERGE_TASKS)
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def _run_merge(artifact_id: int, model_ref: str, lease: str) -> None:
-    output_dir = _settings.models_dir / f"merged-{artifact_id}"
-    workdir = _settings.runs_dir / "merge" / str(artifact_id)
-    workdir.mkdir(parents=True, exist_ok=True)
-    config_path = workdir / "config.json"
-    log_file = workdir / "output.log"
-    config_path.write_text(json.dumps({"model_ref": model_ref, "output_dir": str(output_dir)}), encoding="utf-8")
-    error = None
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-u", "-m", "app.train_entry.merge", str(config_path),
-            cwd=str(Path(__file__).resolve().parents[2]),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            line = raw.decode(errors="replace").strip()
-            if line:
-                append_log_line(log_file, "error" if line.startswith("ERROR:") else "info", line)
-                await hub.publish(f"merge:{artifact_id}", {"type": "log", "message": line})
-        await proc.wait()
-        if proc.returncode:
-            error = f"Merge subprocess exited with code {proc.returncode}."
-    except asyncio.CancelledError:
-        error = "Merge interrupted by backend shutdown."
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-    except Exception as exc:  # noqa: BLE001
-        error = str(exc)
-    finally:
-        gpu.release(lease)
-    if error:
-        _update_artifact(artifact_id, status="failed", error=error)
-        await hub.publish(f"merge:{artifact_id}", {"type": "status", "status": "failed", "detail": error})
-    else:
-        _update_artifact(artifact_id, status="ready", local_path=str(output_dir))
-        await hub.publish(f"merge:{artifact_id}", {"type": "status", "status": "ready"})
+    await export_jobs.shutdown()
 
 
 @router.get("/quantize/{artifact_id}/logs")
 def quantize_logs(artifact_id: int, lines: int = 2000):
-    """Full persisted log history for a GGUF export job — works after it
-    finishes too, not just while /ws/gguf/{id} is streaming it live."""
-    return {"lines": read_log_tail(_gguf_log_path(artifact_id), lines)}
-
-
-async def _run_quantize(art_id: int, src: str, quant_type: str) -> None:
-    out_dir = _settings.models_dir / f"gguf-{art_id}"
-    topic = f"gguf:{art_id}"
-    lpath = _gguf_log_path(art_id)
-    loop = asyncio.get_running_loop()
-
-    def on_line(line: str) -> None:
-        # Called from the worker thread `asyncio.to_thread` runs `gguf.quantize`
-        # on — never touch the event loop directly from here. Persisting to
-        # disk is thread-safe (plain file append); publishing to the WS hub
-        # must be scheduled back onto the loop via run_coroutine_threadsafe.
-        append_log_line(lpath, "info", line)
-        asyncio.run_coroutine_threadsafe(hub.publish(topic, {"type": "log", "message": line}), loop)
-
-    append_log_line(lpath, "info", f"Starting GGUF export ({quant_type}) for artifact {art_id} from {src}")
-    await hub.publish(topic, {"type": "log", "message": f"Starting GGUF export ({quant_type})…"})
-    try:
-        path = await asyncio.to_thread(gguf.quantize, src, str(out_dir), quant_type, on_line)
-        append_log_line(lpath, "info", f"Quantize complete → {path}")
-        _update_artifact(art_id, status="ready", local_path=path)
-        await hub.publish(topic, {"type": "status", "status": "ready"})
-        log.info("gguf quantize %s complete: %s", art_id, path)
-    except Exception as e:  # noqa: BLE001 — surfaced on the artifact row
-        append_log_line(lpath, "error", str(e))
-        _update_artifact(art_id, status="failed", error=str(e))
-        await hub.publish(topic, {"type": "status", "status": "failed", "detail": str(e)})
-        log.warning("gguf quantize %s failed: %s", art_id, e)
-    finally:
-        await hub.publish(topic, {"type": "done"})
-
-
-def _update_artifact(art_id: int, **fields) -> None:
-    with Session(engine) as db:
-        art = db.get(ModelArtifact, art_id)
-        if art:
-            for k, v in fields.items():
-                setattr(art, k, v)
-            db.add(art)
-            db.commit()
+    new_path = export_jobs.workdir(artifact_id) / "output.log"
+    return {"lines": read_log_tail(new_path if new_path.exists() else _gguf_log_path(artifact_id), lines)}

@@ -13,7 +13,8 @@ import re
 from dataclasses import dataclass
 
 from app.config import get_settings
-from app.domain import FitLevel, HardwareProfile, MemoryEstimate, Method, RunConfig
+from app.domain import FitLevel, HardwareProfile, MemoryEstimate, Method, RunConfig, TaskType
+from app.optimizations import optimizer_memory_multiplier
 
 _MB = 1024 * 1024
 # CUDA context + driver + framework baseline that exists before any weights load.
@@ -65,12 +66,17 @@ def spec_from_name(name: str) -> ModelSpec:
 
 
 def _bytes_per_weight(cfg: RunConfig) -> float:
-    if cfg.method == Method.QLORA or cfg.load_in_4bit:
+    if cfg.quantization.mode in {"nf4", "fp4"} or cfg.method == Method.QLORA or cfg.load_in_4bit:
         return 0.55       # 4-bit NF4 packed + per-block scales/zeros
-    return 2.0            # fp16 / bf16
+    if cfg.quantization.mode == "int8":
+        return 1.1
+    return 4.0 if cfg.runtime.precision == "fp32" else 2.0
 
 
-def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEstimate:
+def estimate(
+    cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec,
+    reference_spec: ModelSpec | None = None,
+) -> MemoryEstimate:
     notes: list[str] = []
     n = spec.num_params
     settings = get_settings()
@@ -91,15 +97,29 @@ def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEsti
         # LoRA optimizer/grad are fp32-ish but tiny relative to base.
         adapters_mb = trainable * 4 / _MB
         gradients_mb = trainable * 4 / _MB
-        optimizer_mb = trainable * (2 if "8bit" in cfg.optim.optimizer else 8) / _MB
+        optimizer_mb = trainable * (2 if "8bit" in cfg.optim.optimizer else 8) * optimizer_memory_multiplier(cfg) / _MB
         notes.append(f"~{trainable/1e6:.1f}M trainable adapter params")
+    elif cfg.method == Method.FREEZE:
+        layer_fraction = min(1.0, cfg.freeze.last_n_layers / max(1, spec.num_layers))
+        trainable = int(n * layer_fraction)
+        if cfg.freeze.train_embeddings:
+            trainable += spec.hidden_size * min(n // max(1, spec.hidden_size), 256_000)
+        if cfg.freeze.train_lm_head:
+            trainable += spec.hidden_size * min(n // max(1, spec.hidden_size), 256_000)
+        if cfg.freeze.train_norms:
+            trainable += 2 * spec.hidden_size * spec.num_layers
+        trainable = min(n, trainable)
+        gradients_mb = trainable * (4 if cfg.runtime.precision == "fp32" else 2) / _MB
+        optimizer_mb = trainable * (6 if "8bit" in cfg.optim.optimizer else 12) * optimizer_memory_multiplier(cfg) / _MB
+        notes.append(f"~{trainable/1e6:.1f}M estimated trainable freeze-tuning params")
     elif cfg.method == Method.FULL:
         trainable = n
         # adamw_8bit: 8-bit m+v (2B) + fp16 grad (2B) + fp32 master (4B).
-        gradients_mb = trainable * 2 / _MB
-        optimizer_mb = trainable * (6 if "8bit" in cfg.optim.optimizer else 12) / _MB
+        gradients_mb = trainable * (4 if cfg.runtime.precision == "fp32" else 2) / _MB
+        optimizer_mb = trainable * (6 if "8bit" in cfg.optim.optimizer else 12) * optimizer_memory_multiplier(cfg) / _MB
         notes.append("Full fine-tune: optimizer state dominates VRAM")
     else:  # prompt/prefix tuning — trainable is negligible
+        trainable = min(n, spec.hidden_size * 32)
         optimizer_mb = 8.0
         gradients_mb = 4.0
 
@@ -108,12 +128,25 @@ def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEsti
     s = cfg.train.max_seq_length
     # Checkpointed activations ~ store per-layer inputs: b * s * hidden * 2 bytes,
     # times a modest constant for attention/MLP temporaries.
-    activations_mb = b * s * spec.hidden_size * 2 * (max(4, spec.num_layers * .6) if cfg.gradient_checkpointing else spec.num_layers * 8) / _MB
+    pairwise = cfg.task == TaskType.ALIGNMENT and cfg.alignment.objective != "kto"
+    activation_bytes = 4 if cfg.runtime.precision == "fp32" else 2
+    activations_mb = b * (2 if pairwise else 1) * s * spec.hidden_size * activation_bytes * (max(4, spec.num_layers * .6) if cfg.gradient_checkpointing else spec.num_layers * 8) / _MB
+    if pairwise:
+        notes.append("Pairwise alignment scores chosen and rejected sequences per sample.")
 
     # --- KV cache (small during checkpointed training; kept for realism) ---
     kv_cache_mb = 0.0  # Training disables use_cache; attention temporaries are in activations.
 
-    subtotal = weights_mb + adapters_mb + gradients_mb + optimizer_mb + activations_mb + kv_cache_mb
+    reference_model_mb = 0.0
+    if cfg.task == TaskType.ALIGNMENT and cfg.alignment.reference.strategy in {"base_model", "separate_model"}:
+        reference_model_mb = (reference_spec or spec).num_params * _bytes_per_weight(cfg) / _MB
+        if cfg.alignment.reference.strategy == "separate_model" and reference_spec is None:
+            notes.append("Separate reference size unavailable; using policy size as an approximation.")
+        notes.append(f"Reference model adds ~{reference_model_mb:.0f} MB of weights")
+    subtotal = (
+        weights_mb + adapters_mb + gradients_mb + optimizer_mb
+        + activations_mb + kv_cache_mb + reference_model_mb
+    )
     overhead_mb = _CUDA_CONTEXT_MB + 0.15 * subtotal
     total_mb = subtotal + overhead_mb
 
@@ -145,6 +178,7 @@ def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEsti
     return MemoryEstimate(
         weights_mb=round(weights_mb, 1),
         optimizer_mb=round(optimizer_mb, 1),
+        reference_model_mb=round(reference_model_mb, 1),
         gradients_mb=round(gradients_mb, 1),
         adapters_mb=round(adapters_mb, 1),
         activations_mb=round(activations_mb, 1),
@@ -160,6 +194,10 @@ def estimate(cfg: RunConfig, hw: HardwareProfile, spec: ModelSpec) -> MemoryEsti
         fit=fit,
         source="fallback",
         notes=notes,
+        total_parameters=n,
+        trainable_parameters=trainable,
+        frozen_parameters=n - trainable,
+        trainable_percentage=round(100 * trainable / n, 6) if n else 0.0,
     )
 
 

@@ -30,6 +30,8 @@ const KINDS: { value: DatasetKind; label: string }[] = [
   { value: "domain_corpus", label: "Domain corpus (text)" },
   { value: "pretrain_corpus", label: "Pretraining corpus (text)" },
   { value: "eval", label: "Evaluation set" },
+  { value: "preference", label: "Preference pairs" },
+  { value: "kto", label: "KTO labels" },
 ];
 
 const KIND_BADGE: Record<DatasetKind, string> = {
@@ -37,6 +39,8 @@ const KIND_BADGE: Record<DatasetKind, string> = {
   domain_corpus: "Domain",
   pretrain_corpus: "Pretrain",
   eval: "Eval",
+  preference: "Preference",
+  kto: "KTO",
 };
 
 export default function Datasets() {

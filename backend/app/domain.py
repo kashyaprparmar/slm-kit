@@ -11,7 +11,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # --------------------------------------------------------------------------- #
@@ -21,6 +21,7 @@ class TaskType(str, Enum):
     PRETRAIN = "pretrain"                    # Pillar 1: from-scratch
     CONTINUED_PRETRAIN = "continued_pretrain"  # Pillar 2: domain adaptation
     FINETUNE = "finetune"                    # Pillar 3: instruction fine-tuning
+    ALIGNMENT = "alignment"                  # Preference/alignment objectives
 
 
 class TrainingStage(str, Enum):
@@ -38,6 +39,7 @@ class TrainingStage(str, Enum):
 
 
 class Method(str, Enum):
+    FREEZE = "freeze"
     LORA = "lora"
     QLORA = "qlora"
     DORA = "dora"
@@ -58,6 +60,8 @@ class DatasetKind(str, Enum):
     DOMAIN_CORPUS = "domain_corpus"          # raw text for continued pretraining
     INSTRUCTION = "instruction"              # chat/instruction pairs
     EVAL = "eval"                            # held-out evaluation set
+    PREFERENCE = "preference"                # chosen/rejected preference pairs
+    KTO = "kto"                              # desirable/undesirable responses
 
 
 class Quantization(str, Enum):
@@ -67,6 +71,13 @@ class Quantization(str, Enum):
 
 
 class ArtifactKind(str, Enum):
+    CAUSAL_LM = "causal_lm"
+    ADAPTER = "adapter"
+    MERGED_MODEL = "merged_model"
+    REWARD_MODEL = "reward_model"
+    REFERENCE_MODEL = "reference_model"
+    QUANTIZED_MODEL = "quantized_model"
+    # Historical values remain valid for stored rows and API clients.
     PRETRAIN = "pretrain"
     DOMAIN = "domain"
     FINETUNE = "finetune"
@@ -124,6 +135,7 @@ class MemoryEstimate(BaseModel):
 
     weights_mb: float = 0.0
     optimizer_mb: float = 0.0
+    reference_model_mb: float = 0.0
     gradients_mb: float = 0.0
     adapters_mb: float = 0.0
     activations_mb: float = 0.0
@@ -139,6 +151,10 @@ class MemoryEstimate(BaseModel):
     fit: FitLevel = FitLevel.FITS
     source: str = "fallback"        # "llmfit" | "fallback"
     notes: list[str] = Field(default_factory=list)
+    total_parameters: int | None = None
+    trainable_parameters: int | None = None
+    frozen_parameters: int | None = None
+    trainable_percentage: float | None = None
 
 
 class ValidationIssue(BaseModel):
@@ -172,6 +188,94 @@ class LoraParams(BaseModel):
     target_modules: list[str] = Field(default_factory=list)  # automatic all-linear targeting
     use_rslora: bool = False
     use_dora: bool = False  # flipped on automatically when method == DORA
+    target_strategy: Literal["auto", "all_linear", "attention", "mlp", "custom"] = "auto"
+    init_method: Literal["standard", "pissa", "loftq", "eva"] = "standard"
+    lora_plus_lr_ratio: float | None = Field(default=None, gt=0)
+
+
+class FreezeParams(BaseModel):
+    """Explicit parameter groups for partial/freeze tuning."""
+
+    last_n_layers: int = Field(default=1, ge=0, le=1024)
+    train_embeddings: bool = False
+    train_lm_head: bool = True
+    train_norms: bool = False
+    selected_modules: list[str] = Field(default_factory=list)
+
+
+class QuantizationConfig(BaseModel):
+    mode: Literal["none", "nf4", "fp4", "int8"] = "none"
+    compute_dtype: Literal["auto", "bf16", "fp16", "fp32"] = "auto"
+    double_quant: bool = True
+    storage_dtype: Literal["auto", "uint8", "bf16", "fp16", "fp32"] = "auto"
+
+
+class RopeConfig(BaseModel):
+    enabled: bool = False
+    factor: float = Field(default=1.0, ge=1.0, le=64.0)
+    type: Literal["linear", "dynamic", "yarn"] = "linear"
+
+    @model_validator(mode="after")
+    def require_extension_factor_when_enabled(self) -> RopeConfig:
+        if self.enabled and self.factor <= 1:
+            raise ValueError("Enabled RoPE extension requires factor greater than 1.")
+        return self
+
+
+class RuntimeConfig(BaseModel):
+    precision: Literal["auto", "bf16", "fp16", "fp32"] = "auto"
+    attention: Literal["auto", "sdpa", "flash_attention_2", "eager"] = "auto"
+    gradient_checkpointing: Literal[
+        "auto", "off", "standard", "non_reentrant", "backend_optimized"
+    ] = "auto"
+    use_liger: bool = False
+    neftune_noise_alpha: float | None = Field(default=None, gt=0, le=100)
+    rope: RopeConfig = Field(default_factory=RopeConfig)
+
+
+class ReferenceModelConfig(BaseModel):
+    strategy: Literal["base_model", "separate_model", "adapter_disabled", "none"] = "base_model"
+    model: str | None = None
+    revision: str | None = None
+
+    @model_validator(mode="after")
+    def validate_strategy(self) -> ReferenceModelConfig:
+        if self.strategy == "separate_model" and not self.model:
+            raise ValueError("A separate reference strategy requires reference.model.")
+        if self.strategy != "separate_model" and self.model:
+            raise ValueError("reference.model is valid only with the separate_model strategy.")
+        if self.strategy != "separate_model" and self.revision:
+            raise ValueError("reference.revision is valid only with the separate_model strategy; base references use the run revision.")
+        return self
+
+
+class AlignmentConfig(BaseModel):
+    objective: Literal["dpo", "ipo", "orpo", "simpo", "kto", "reward_model"] = "dpo"
+    beta: float = Field(default=0.1, gt=0, le=100)
+    dpo_loss_variant: Literal["sigmoid", "hinge", "robust", "exo_pair"] = "sigmoid"
+    label_smoothing: float = Field(default=0.0, ge=0, lt=0.5)
+    simpo_gamma: float = Field(default=0.5, ge=0)
+    desirable_weight: float = Field(default=1.0, gt=0)
+    undesirable_weight: float = Field(default=1.0, gt=0)
+    reference: ReferenceModelConfig = Field(default_factory=ReferenceModelConfig)
+
+    @model_validator(mode="after")
+    def validate_objective(self) -> AlignmentConfig:
+        if self.objective in {"orpo", "simpo", "reward_model"} and self.reference.strategy != "none":
+            raise ValueError(f"{self.objective.upper()} is reference-free; set reference.strategy to 'none'.")
+        if self.objective in {"dpo", "ipo", "kto"} and self.reference.strategy == "none":
+            raise ValueError(f"{self.objective.upper()} requires an explicit reference strategy.")
+        if self.objective == "ipo" and self.label_smoothing:
+            raise ValueError("IPO does not support label smoothing in the shared DPO trainer strategy.")
+        if self.objective != "simpo" and self.simpo_gamma != 0.5:
+            raise ValueError("simpo_gamma is valid only for the SimPO objective.")
+        if self.objective != "dpo" and self.dpo_loss_variant != "sigmoid":
+            raise ValueError("dpo_loss_variant is valid only for the DPO objective.")
+        if self.objective != "dpo" and self.label_smoothing:
+            raise ValueError("label_smoothing is valid only for the DPO objective.")
+        if self.objective == "dpo" and self.label_smoothing and self.dpo_loss_variant == "hinge":
+            raise ValueError("DPO hinge loss does not support label smoothing.")
+        return self
 
 
 class OptimConfig(BaseModel):
@@ -181,6 +285,10 @@ class OptimConfig(BaseModel):
     weight_decay: float = Field(default=0.01, ge=0.0, le=1.0)
     optimizer: str = "adamw_8bit"         # 8-bit Adam is the 8GB-safe default
     max_grad_norm: float = Field(default=1.0, gt=0)
+    strategy: Literal["default", "galore", "apollo", "badam", "adam_mini", "muon"] = "default"
+    target_modules: list[str] = Field(default_factory=list)
+    low_rank_rank: int = Field(default=128, ge=1, le=65_536)
+    update_interval: int = Field(default=200, ge=1, le=100_000)
 
 
 class TrainConfig(BaseModel):
@@ -189,7 +297,7 @@ class TrainConfig(BaseModel):
     per_device_batch_size: int = Field(default=2, ge=1, le=1_024)
     gradient_accumulation: int = Field(default=4, ge=1, le=65_536)
     max_seq_length: int = Field(default=1024, ge=16, le=1_048_576)
-    packing: bool = False
+    packing: bool | None = None
     seed: int = Field(default=42, ge=0, le=2**32 - 1)
     save_steps: int = Field(default=100, ge=1)
     logging_steps: int = Field(default=5, ge=1)
@@ -199,7 +307,8 @@ class TrainConfig(BaseModel):
 class TokenizerConfig(BaseModel):
     """Versioned tokenizer/rendering policy shared by preparation and workers."""
 
-    mode: Literal["reuse", "extend", "train"] = "reuse"
+    mode: Literal["reuse", "extend", "train", "import"] = "reuse"
+    source: str | None = None
     chat_template: str | None = None
     loss_policy: Literal["full_sequence", "completion_only", "assistant_only"] = "full_sequence"
     added_tokens: list[str] = Field(default_factory=list)
@@ -243,6 +352,10 @@ class RunConfig(BaseModel):
     gradient_checkpointing: bool = True
     tokenizer: TokenizerConfig = Field(default_factory=TokenizerConfig)
     lora: LoraParams = Field(default_factory=LoraParams)
+    freeze: FreezeParams = Field(default_factory=FreezeParams)
+    quantization: QuantizationConfig = Field(default_factory=QuantizationConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
     optim: OptimConfig = Field(default_factory=OptimConfig)
     train: TrainConfig = Field(default_factory=TrainConfig)
 
@@ -251,6 +364,37 @@ class RunConfig(BaseModel):
 
     # Escape hatch for backend-specific knobs without schema churn.
     extra: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def resolve_compatible_defaults(self) -> RunConfig:
+        """Normalize defaults once for API, workers, exports, and future CLI callers."""
+        if self.train.packing is None:
+            self.train.packing = self.task in {TaskType.PRETRAIN, TaskType.CONTINUED_PRETRAIN}
+        if self.method == Method.QLORA:
+            if self.quantization.mode == "none":
+                self.quantization.mode = "nf4"
+        self.load_in_4bit = self.quantization.mode in {"nf4", "fp4"}
+        if self.method == Method.DORA:
+            self.lora.use_dora = True
+        if self.task == TaskType.ALIGNMENT:
+            if self.method not in {Method.FULL, Method.LORA, Method.QLORA, Method.DORA}:
+                raise ValueError("Alignment supports full, LoRA, QLoRA, or DoRA tuning.")
+            if self.alignment.reference.strategy == "adapter_disabled" and self.method not in {
+                Method.LORA, Method.QLORA, Method.DORA
+            }:
+                raise ValueError("adapter_disabled reference handling requires an adapter-based method.")
+        if self.quantization.mode == "int8":
+            if self.quantization.compute_dtype != "auto":
+                raise ValueError("8-bit loading does not accept a 4-bit compute dtype override.")
+            if self.quantization.storage_dtype != "auto":
+                raise ValueError("8-bit loading does not accept a 4-bit storage dtype override.")
+            if self.quantization.double_quant:
+                raise ValueError("Nested/double quantization is available only for NF4 or FP4.")
+        if self.runtime.gradient_checkpointing == "off":
+            self.gradient_checkpointing = False
+        elif self.runtime.gradient_checkpointing != "auto":
+            self.gradient_checkpointing = True
+        return self
 
     @property
     def training_stage(self) -> TrainingStage:
@@ -272,6 +416,7 @@ def training_stage_for_task(task: TaskType) -> TrainingStage:
         TaskType.PRETRAIN: TrainingStage.FROM_SCRATCH_PRETRAINING,
         TaskType.CONTINUED_PRETRAIN: TrainingStage.CONTINUED_PRETRAINING,
         TaskType.FINETUNE: TrainingStage.SUPERVISED_FINE_TUNING,
+        TaskType.ALIGNMENT: TrainingStage.ALIGNMENT,
     }[task]
 
 

@@ -52,6 +52,10 @@ class ModelCapabilities(BaseModel):
     quantization: dict[str, Capability]
     export: dict[str, Capability]
     precision: dict[str, Capability]
+    attention: dict[str, Capability] = Field(default_factory=dict)
+    gradient_checkpointing: dict[str, Capability] = Field(default_factory=dict)
+    rope: dict[str, Capability] = Field(default_factory=dict)
+    templates: dict[str, Capability] = Field(default_factory=dict)
     distributed: dict[str, Capability]
     template_capabilities: ChatTemplateCapabilities
     peft_methods: dict[str, PeftMethodCapability]
@@ -79,6 +83,24 @@ class ModelFamilyAdapter(Protocol):
 
     def suggested_target_modules(self) -> list[str]: ...
 
+    def detect(self, model_ref: str, config: dict[str, Any]) -> bool: ...
+
+    def patch_config(self, config: dict[str, Any]) -> dict[str, Any]: ...
+
+    def patch_tokenizer(self, tokenizer_config: dict[str, Any]) -> dict[str, Any]: ...
+
+    def attention_support(self) -> tuple[str, ...]: ...
+
+    def rope_support(self) -> tuple[str, ...]: ...
+
+    def gradient_checkpointing_support(self) -> tuple[str, ...]: ...
+
+    def tool_template_support(self) -> bool: ...
+
+    def reasoning_template_support(self) -> bool: ...
+
+    def multimodal_support(self) -> bool: ...
+
 
 @dataclass(frozen=True)
 class MetadataModelFamilyAdapter:
@@ -94,6 +116,10 @@ class MetadataModelFamilyAdapter:
     )
     template_ids: tuple[str, ...] = ()
     notes: tuple[str, ...] = field(default_factory=tuple)
+    supports_rope_scaling: bool = True
+    supports_tools: bool = False
+    supports_reasoning: bool = False
+    multimodal: bool = False
 
     def matches(self, model_ref: str, model_type: str, architectures: list[str]) -> bool:
         if model_type in self.model_types:
@@ -107,6 +133,36 @@ class MetadataModelFamilyAdapter:
 
     def suggested_target_modules(self) -> list[str]:
         return list(self.target_modules)
+
+    def detect(self, model_ref: str, config: dict[str, Any]) -> bool:
+        architectures = config.get("architectures") or []
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        return self.matches(model_ref, str(config.get("model_type") or "").lower(), list(architectures))
+
+    def patch_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        return dict(config)
+
+    def patch_tokenizer(self, tokenizer_config: dict[str, Any]) -> dict[str, Any]:
+        return dict(tokenizer_config)
+
+    def attention_support(self) -> tuple[str, ...]:
+        return ("auto", "eager", "sdpa", "flash_attention_2")
+
+    def rope_support(self) -> tuple[str, ...]:
+        return ("linear", "dynamic", "yarn") if self.supports_rope_scaling else ()
+
+    def gradient_checkpointing_support(self) -> tuple[str, ...]:
+        return ("auto", "off", "standard", "non_reentrant", "backend_optimized")
+
+    def tool_template_support(self) -> bool:
+        return self.supports_tools
+
+    def reasoning_template_support(self) -> bool:
+        return self.supports_reasoning
+
+    def multimodal_support(self) -> bool:
+        return self.multimodal
 
 
 # Compatibility alias for extensions and tests that imported the old name.
@@ -219,16 +275,33 @@ def resolve_capabilities(
         "sft": _cap(train_state, train_reason, "transformers", "trl"),
         "continued_pretraining": _cap(train_state, train_reason, "transformers"),
         "full": _cap(train_state, train_reason, "transformers"),
+        "freeze": _cap(train_state, train_reason, "transformers"),
         "lora": _cap(lora_state, train_reason, "peft"),
         "qlora": _cap(lora_state, train_reason, "peft", "bitsandbytes", "CUDA"),
         "dora": _cap(lora_state, train_reason, "peft"),
-        "dpo": _cap(unsupported, "Preference optimization is not implemented by the current worker."),
-        "orpo": _cap(unsupported, "Preference optimization is not implemented by the current worker."),
-        "kto": _cap(unsupported, "Preference optimization is not implemented by the current worker."),
-        "ppo": _cap(unsupported, "Reward-model/PPO orchestration is not implemented."),
+        "dpo": _cap(train_state, "Shared TRL preference training supports this causal architecture."),
+        "ipo": _cap(train_state, "IPO reuses the shared DPO trainer strategy."),
+        "orpo": _cap(train_state, "ORPO uses the shared reference-free preference pipeline."),
+        "simpo": _cap(experimental if causal else unsupported, "SimPO requires a compatible TRL CPO runtime."),
+        "kto": _cap(train_state, "KTO uses its dedicated label semantics in the shared alignment pipeline."),
+        "reward_model": _cap(train_state, "Reward modeling uses a scalar sequence-classification head and pairwise preference data."),
+        "ppo": _cap(unsupported, "PPO orchestration is not implemented."),
     }
     if kind == "scratch":
-        for operation in ("sft", "continued_pretraining", "lora", "qlora", "dora"):
+        for operation in (
+            "sft",
+            "continued_pretraining",
+            "freeze",
+            "lora",
+            "qlora",
+            "dora",
+            "dpo",
+            "ipo",
+            "orpo",
+            "simpo",
+            "kto",
+            "reward_model",
+        ):
             training[operation] = _cap(unsupported, "Scratch GPT currently supports only from-scratch full training with the scratch backend.")
         training["full"] = _cap(supported, "The scratch backend initializes a new GPT; loading saved weights is not full optimizer-state resume.", "torch", "tokenizers")
     transformers_state = train_state if causal and kind != "scratch" else unsupported
@@ -267,10 +340,59 @@ def resolve_capabilities(
         "gguf": quantization["gguf"],
     }
     precision = {
+        "auto": _cap(transformers_state, "Select BF16, FP16, or FP32 from verified runtime hardware."),
         "fp32": _cap(transformers_state, "Portable CPU/GPU precision."),
         "fp16": _cap(transformers_state, "Supported on compatible CUDA GPUs."),
         "bf16": _cap(transformers_state, "Requires BF16-capable hardware."),
         "fp8": _cap(experimental if causal else unsupported, "Requires recent GPU hardware and a provider-specific runtime."),
+    }
+    attention = {
+        "auto": _cap(transformers_state, "Use the model and Transformers default attention implementation."),
+        "eager": _cap(transformers_state, "Portable eager attention implementation."),
+        "sdpa": _cap(transformers_state, "Requires a compatible PyTorch scaled-dot-product attention implementation.", "torch>=2"),
+        "flash_attention_2": _cap(
+            experimental if causal else unsupported,
+            "Requires a compatible CUDA model, dtype, and flash-attn runtime.",
+            "flash-attn", "CUDA",
+        ),
+    }
+    gradient_checkpointing = {
+        "auto": _cap(train_state, "Select the backend's supported checkpointing mode."),
+        "off": _cap(train_state, "Gradient checkpointing disabled explicitly."),
+        "standard": _cap(train_state, "Use the model's standard gradient checkpointing hook."),
+        "non_reentrant": _cap(train_state, "Use PyTorch non-reentrant checkpointing when accepted by the model."),
+        "backend_optimized": _cap(
+            rule.unsloth if rule and causal else unsupported,
+            "Uses an optimized backend-specific checkpointing implementation.",
+            "unsloth",
+        ),
+    }
+    rope = {
+        "none": _cap(supported, "Keep the model's configured context and RoPE behavior."),
+        "linear": _cap(
+            train_state if rule and rule.supports_rope_scaling else unsupported,
+            "Linear RoPE scaling must be requested explicitly and verified by the loader.",
+        ),
+        "dynamic": _cap(
+            train_state if rule and rule.supports_rope_scaling else unsupported,
+            "Dynamic RoPE scaling must be requested explicitly and verified by the loader.",
+        ),
+        "yarn": _cap(experimental if rule and rule.supports_rope_scaling else unsupported,
+                     "YaRN support depends on the concrete model configuration and Transformers version."),
+    }
+    templates = {
+        "tools": _cap(
+            supported if rule and rule.supports_tools and tok.get("chat_template") else unsupported,
+            "Tool templates require explicit family and tokenizer-template support.",
+        ),
+        "reasoning": _cap(
+            supported if rule and rule.supports_reasoning and tok.get("chat_template") else unsupported,
+            "Reasoning templates require explicit family and tokenizer-template support.",
+        ),
+        "multimodal": _cap(
+            experimental if multimodal else unsupported,
+            "Multimodal metadata is detected, but the training processor remains unsupported.",
+        ),
     }
     distributed = {
         "multi_gpu": _cap(experimental if causal else unsupported, "Configuration is represented, but the local scheduler currently launches one worker."),
@@ -326,6 +448,9 @@ def resolve_capabilities(
         for name, capability in quantization.items()
     }
 
+    from app.models.quantization_registry import quantization_capabilities
+    # Preserve legacy names while using one operation-specific source for new consumers.
+    quantization_matrix.update(quantization_capabilities())
     context = next((cfg.get(key) for key in ("max_position_embeddings", "n_positions", "seq_length", "model_max_length") if cfg.get(key)), tok.get("model_max_length"))
     try:
         context = int(context) if context is not None and int(context) < 10**9 else None
@@ -353,6 +478,10 @@ def resolve_capabilities(
         quantization=quantization,
         export=export,
         precision=precision,
+        attention=attention,
+        gradient_checkpointing=gradient_checkpointing,
+        rope=rope,
+        templates=templates,
         distributed=distributed,
         template_capabilities=template_capabilities,
         peft_methods=peft_methods,

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import advisor, data_lab, datasets, projects, registry, runs, serving, system
 from app.api import eval as eval_api
+from app.api.openai_gateway import router as openai_router
 from app.config import get_settings
 from app.core.errors import install_errors
 from app.core.hardware import poller
@@ -41,6 +42,10 @@ async def lifespan(app: FastAPI):
     poller.start()
     queue.start()
     await queue.recover_orphans()
+    from app.core.export_jobs import manager as export_jobs
+    export_jobs.recover()
+    from app.core.serving_benchmarks import manager as benchmark_manager
+    benchmark_manager.recover()
     log.info("SLM Kit backend ready")
     yield
     log.info("SLM Kit backend shutting down")
@@ -48,6 +53,12 @@ async def lifespan(app: FastAPI):
     # while the other managed GPU processes are being torn down.
     await queue.stop()
     await registry.stop_background_tasks()
+    await export_jobs.shutdown()
+    await benchmark_manager.shutdown()
+    from app.serving.providers import sglang, vllm
+    for provider in (vllm, sglang):
+        if provider._lease:
+            await provider.stop()
     # The managed server is a child GPU process; terminate it before the API
     # exits so a restart never leaves VRAM or the deployment port occupied.
     from app.core.deployment import manager as deployment_manager
@@ -97,6 +108,7 @@ app.include_router(registry.router)
 app.include_router(advisor.router)
 app.include_router(eval_api.router)
 app.include_router(serving.router)
+app.include_router(openai_router)
 
 
 @app.get("/api/health")

@@ -35,9 +35,9 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 
 ## R03 — OPTIONAL LLAMA-FACTORY BACKEND
 
-- **Classification:** 4. Missing.
-- **Code finding:** No LlamaFactoryBackend registration or launcher. Capability entry is a fixed not_installed placeholder, not detection.
-- **Evidence:** `backend/app/backends/base.py`, `backend/app/models/capabilities.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Optional `LlamaFactoryBackend` performs package/CLI/version discovery, compatibility reporting, config/canonical-data translation, supervised subprocess launch, event/checkpoint/artifact mapping, cancellation, and failure reporting. It remains unverified with an installed runtime.
+- **Evidence:** `backend/app/backends/base.py`, `backend/app/backends/llamafactory_backend.py`, `backend/tests/test_backend_resolution.py`.
 - **Roadmap:** B14, B15 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r04"></a>
@@ -45,7 +45,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R04 — TRAINING STAGE MODEL
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Persisted task enums are now mapped to a separate TrainingStage and normalized operation identity. LoRA/QLoRA/DoRA/full execute; freeze and alignment execution remain absent. Prompt tuning stays explicitly unsupported.
+- **Code finding:** Persisted task enums map to a separate TrainingStage and normalized operation identity. Full/freeze/LoRA/QLoRA/DoRA and shared preference alignment execution paths exist; optional runtime verification remains incomplete. Prompt tuning stays explicitly unsupported.
 - **Evidence:** `backend/app/domain.py`, `backend/app/backends/unsloth_backend.py`.
 - **Roadmap:** B01, B06, C01 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -53,27 +53,27 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 
 ## R05 — FREEZE TUNING
 
-- **Classification:** 4. Missing.
-- **Code finding:** No freeze configuration, module selection execution or exact trainable preview.
-- **Evidence:** `backend/app/domain.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Freeze configuration and loaded-architecture selection cover last N transformer layers, embeddings, LM head, norms, and custom modules with exact worker counts. Real-model optimizer mutation evidence remains open.
+- **Evidence:** `backend/app/domain.py`, `backend/app/train_entry/module_selection.py`, `backend/tests/test_phase_b_core.py`.
 - **Roadmap:** B05, B06 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r06"></a>
 
 ## R06 — CANONICAL DATA ADAPTER SYSTEM
 
-- **Classification:** 2. Implemented but needs enhancement.
-- **Code finding:** canonicalize/detect_schema already unify preparation, validation, training and evaluation; no extensible adapter descriptors.
-- **Evidence:** `backend/app/datasets/adapters.py`.
+- **Classification:** 1. Already implemented correctly.
+- **Code finding:** The compatible canonicalize/detect facade now delegates to an extensible registry with detection, structured validation, canonicalization, preview, fingerprint, and stage capability contracts. Existing consumers and v1 storage shapes are preserved.
+- **Evidence:** `backend/app/datasets/adapters.py`, `backend/tests/test_canonical_dataset_architecture.py`.
 - **Roadmap:** A01, A04 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r07"></a>
 
 ## R07 — ALPACA DATA FORMAT
 
-- **Classification:** 3. Partially implemented.
-- **Code finding:** Instruction/input/output works. Pair conversion ignores top-level system and history (reproduced in audit).
-- **Evidence:** `backend/app/datasets/adapters.py`.
+- **Classification:** 1. Already implemented correctly.
+- **Code finding:** Instruction/input/output preserves optional system, ordered history, current instruction/input, and final output. Invalid or unrepresentable history metadata fails instead of being dropped; Unicode and whitespace remain unchanged.
+- **Evidence:** `backend/app/datasets/adapters.py`, `backend/tests/test_canonical_dataset_architecture.py`.
 - **Roadmap:** A01 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r08"></a>
@@ -108,7 +108,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R11 — PREFERENCE DATASETS
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Chosen/rejected markers detected and explicitly gated; no canonical preference model or preference training validation.
+- **Code finding:** Chosen/rejected markers are detected and explicitly gated. A strict version-2 preference record contract and stable semantic identity exist; source adapters, complete format validation, preparation, and training remain absent.
 - **Evidence:** `backend/app/datasets/adapters.py`.
 - **Roadmap:** A06 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -116,8 +116,8 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 
 ## R12 — KTO DATASETS
 
-- **Classification:** 4. Missing.
-- **Code finding:** No desirability schema. prompt/response/desirable may be interpreted as ordinary pair and lose label; stage cannot be KTO.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Strict version-2 KTO desirability records exist, and desirable markers are detected before ordinary prompt/response fallback. Source canonicalization and KTO execution remain gated.
 - **Evidence:** `backend/app/datasets/adapters.py`, `backend/app/domain.py`.
 - **Roadmap:** A06 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -126,7 +126,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R13 — TOOL-CALLING DATASETS
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Tools/calls recognized and rejected; no schema/argument/ID validation or training execution.
+- **Code finding:** Tools/calls are recognized and rejected for current training. Version-2 definitions preserve structured functions, calls, responses, and JSON-safe arguments; call-ID/role semantic validation and execution remain absent.
 - **Evidence:** `backend/app/datasets/adapters.py`.
 - **Roadmap:** A07 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -135,7 +135,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R14 — MULTIMODAL-READY DATA MODEL
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Model metadata detects multimodal and disables worker; canonical data has no media descriptors or modality contract.
+- **Code finding:** Model metadata detects multimodal and disables the worker. Canonical version 2 now has typed media references and JSON-safe metadata, while source processing and execution remain experimental and unsupported.
 - **Evidence:** `backend/app/models/capabilities.py`, `backend/app/datasets/adapters.py`.
 - **Roadmap:** A06, G01, G02 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -351,7 +351,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R38 — FROM-SCRATCH PRETRAINING
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Custom GPT, byte BPE, causal blocks, save/sample and memory guard implemented. No optimizer/RNG restore, imported tokenizer path or HF from-config architecture choice.
+- **Code finding:** Custom GPT, trained/imported byte BPE, causal blocks, save/sample, optimizer/RNG/step checkpoint restore, architecture checks, and memory guard are implemented. Exact interrupted-run equivalence and HF from-config initialization remain open.
 - **Evidence:** `backend/app/backends/scratch_backend.py`.
 - **Roadmap:** B09, B10 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -359,45 +359,45 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 
 ## R39 — DPO
 
-- **Classification:** 4. Missing.
-- **Code finding:** No DPO task/trainer/config. Generated Unsloth cache files are dependency artifacts, not registered SLM Kit features.
-- **Evidence:** `backend/app/domain.py`, `backend/app/backends/base.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** DPO uses canonical preferences and the shared lifecycle. All four exposed losses train/save/reload on TRL 0.19.1 CPU fixtures; six preference metrics and margin arithmetic pass. Durable reference pinning and broader runtime/GPU coverage remain open.
+- **Evidence:** `backend/app/domain.py`, `backend/app/train_entry/alignment.py`, `backend/tests/test_alignment_architecture.py`.
 - **Roadmap:** C01, C02 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r40"></a>
 
 ## R40 — IPO / ORPO / SIMPO
 
-- **Classification:** 4. Missing.
-- **Code finding:** No IPO/ORPO/SimPO objectives or shared preference strategy.
-- **Evidence:** `backend/app/domain.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** IPO, ORPO, and SimPO share lifecycle code and pass tiny TRL 0.19.1 CPU jobs. SimPO's CPO SFT coefficient is explicitly zero and installed loss math is tested. Broader runtime/GPU coverage remains unverified.
+- **Evidence:** `backend/app/domain.py`, `backend/app/train_entry/alignment.py`.
 - **Roadmap:** C01, C03, C04, C05 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r41"></a>
 
 ## R41 — KTO
 
-- **Classification:** 4. Missing.
-- **Code finding:** No KTO task, labels pipeline or trainer.
-- **Evidence:** `backend/app/domain.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** KTO canonical labels, both-class validation, imbalance warnings, weights, and rendering pass a tiny TRL 0.19.1 CPU artifact job. Preparation revalidates actual data; broader runtime/GPU coverage remains unverified.
+- **Evidence:** `backend/app/domain.py`, `backend/app/datasets/adapters.py`, `backend/app/train_entry/alignment.py`.
 - **Roadmap:** C01, C06 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r42"></a>
 
 ## R42 — REWARD MODELING
 
-- **Classification:** 4. Missing.
-- **Code finding:** No reward trainer, score loader or reward artifact semantics.
-- **Evidence:** `backend/app/domain.py`, `backend/app/train_entry/model_runtime.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Full/LoRA/DoRA reward training and registered adapter scalar scoring pass real local TRL 0.19.1 CPU jobs. PEFT heads are excluded from LoRA targets and retained during continuation. Reward category/lineage/scoring and generation exclusions pass; QLoRA/GPU and broader runtime coverage remain unverified.
+- **Evidence:** `backend/app/domain.py`, `backend/app/train_entry/alignment.py`, `backend/app/train_entry/model_runtime.py`, `backend/app/train_entry/eval_run.py`, `backend/tests/test_reward_model_contract.py`.
 - **Roadmap:** C01, C07 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r43"></a>
 
 ## R43 — REFERENCE MODEL HANDLING
 
-- **Classification:** 4. Missing.
-- **Code finding:** No reference strategy or immutable reference lineage/memory accounting.
-- **Evidence:** `backend/app/domain.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Base, separate, adapter-disabled, and none strategies are validated; second-model memory is estimated; reference strategy is emitted and registered in artifact lineage. Remote reference commits are not yet resolved immutably.
+- **Evidence:** `backend/app/domain.py`, `backend/app/integrations/estimator.py`, `backend/app/train_entry/alignment.py`.
 - **Roadmap:** C01 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r44"></a>
@@ -449,8 +449,8 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 
 ## R49 — PREFERENCE TRAINING TELEMETRY
 
-- **Classification:** 4. Missing.
-- **Code finding:** Generic metric dictionary can carry values, but no preference event producer or objective-aware charts.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Shared alignment callbacks normalize rewards/logprobs/margins/accuracy/KL and emit ordinary metric events. Installed TRL 0.19.1 objectives produce finite telemetry and DPO margin math passes. RunMonitor displays preference metrics; base-versus-trained regression and broader runtime telemetry coverage remain open.
 - **Evidence:** `backend/app/core/events.py`, `frontend/src/components/RunMonitor.tsx`.
 - **Roadmap:** C08 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -540,7 +540,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R59 — ARTIFACT LINEAGE
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Run refs/base_model/source_ref and datasets have lineage; no explicit parent artifact FK, graph or persisted Deployment. Final training only registers Checkpoint.
+- **Code finding:** Run refs/base_model/source_ref and datasets have lineage; final checkpoint/artifact events now idempotently register ModelArtifact metadata including alignment reference strategy. No explicit parent artifact FK, full graph, or persisted Deployment exists.
 - **Evidence:** `backend/app/db/models.py`, `backend/app/core/runner.py`, `backend/app/api/registry.py`.
 - **Roadmap:** B12, E01 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -657,7 +657,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R72 — UI ORGANIZATION
 
 - **Classification:** 2. Implemented but needs enhancement.
-- **Code finding:** 11 lazy-loaded routes with shared shell, grouped nav, nested Data Lab and shared studios; alignment/export subviews pending.
+- **Code finding:** Lazy-loaded routes use a shared shell, grouped nav, nested Data Lab and shared studios; Alignment now reuses TrainingStudio. Export/provider subviews remain pending.
 - **Evidence:** `frontend/src/App.tsx`, `frontend/src/components/layout/nav.ts`.
 - **Roadmap:** G05 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -738,7 +738,7 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R81 — TESTING
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** 78 backend tests and 9 frontend tests pass; mainly unit/contracts/mocks. No real tiny training/export/provider lifecycle regression matrix.
+- **Code finding:** 128 backend tests and 13 frontend tests pass in the current lean environment; they remain mainly unit/contracts/mocks. No real tiny Transformers/TRL, optional-engine, export, or provider lifecycle regression matrix exists.
 - **Evidence:** `backend/tests`, `frontend/src/lib`, `frontend/src/components/ErrorPanel.test.tsx`.
 - **Roadmap:** A16, B16, C08, D08, F04, G05 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
@@ -746,9 +746,9 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 
 ## R82 — LLAMA-FACTORY INTEGRATION TESTS
 
-- **Classification:** 4. Missing.
-- **Code finding:** No optional LLaMA-Factory integration tests or worker.
-- **Evidence:** `backend/tests`, `backend/app/backends/base.py`.
+- **Classification:** 3. Partially implemented.
+- **Code finding:** Discovery, unavailable/installed capability, config translation, and shared artifact-lineage behavior have unit contracts. The optional worker exists, but an installed-runtime launch/cancel/failure test is still missing.
+- **Evidence:** `backend/tests/test_backend_resolution.py`, `backend/app/backends/llamafactory_backend.py`.
 - **Roadmap:** B14, B15 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r83"></a>
@@ -756,8 +756,8 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R83 — MODEL/BACKEND FALLBACK
 
 - **Classification:** 3. Partially implemented.
-- **Code finding:** Fallback inside loader exists and is logged. An exact-match BackendSelector now normalizes explicit registry selection, but there is no Auto resolver, full compatibility evidence, or durable effective-engine identity.
-- **Evidence:** `backend/app/backends/unsloth_backend.py`, `backend/app/api/runs.py`.
+- **Code finding:** Auto resolution evaluates operation/model/hardware/dependencies/objective/tokenizer/runtime before enqueue and persists requested/effective backend plus selection/rejection reasons. Loader-time Unsloth fallback is logged but still lacks a durable effective-loader snapshot; isolated runtime compatibility evidence remains open.
+- **Evidence:** `backend/app/backends/base.py`, `backend/app/backends/unsloth_backend.py`, `backend/app/api/runs.py`.
 - **Roadmap:** B01, B04 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r84"></a>
@@ -765,8 +765,8 @@ A passing unit suite is not proof of GPU/runtime support. Planned experimental f
 ## R84 — DO NOT blindly COPY LLAMA-FACTORY
 
 - **Classification:** 1. Already implemented correctly.
-- **Code finding:** No LLaMA-Factory code integration found; optional boundary preserved. Mandatory dependency or wholesale clone is category 6 (not appropriate).
-- **Evidence:** `backend/app/backends/base.py`, `backend/pyproject.toml`.
+- **Code finding:** The optional adapter translates only SLM Kit contracts at the boundary and keeps database/lifecycle ownership in SLM Kit. No upstream code is copied and no mandatory dependency is added. Wholesale cloning remains category 6 (not appropriate).
+- **Evidence:** `backend/app/backends/llamafactory_backend.py`, `backend/app/backends/base.py`, `backend/pyproject.toml`.
 - **Roadmap:** B14, G04 (see task impact and acceptance details in IMPLEMENTATION_ROADMAP.md).
 
 <a id="r85"></a>

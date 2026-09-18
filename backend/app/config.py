@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     serve_engine: str = "auto"             # auto | vllm | transformers
     vllm_port: int = 8801
     vllm_url: str = "http://127.0.0.1:8801"
+    sglang_url: str = "http://127.0.0.1:8803"
     vllm_gpu_memory_utilization: float = 0.55  # conservative default for 8GB cards
     vllm_max_model_len: int = 4096
     vllm_idle_timeout_seconds: float = 600.0   # auto-stop a warm server after 10 idle min

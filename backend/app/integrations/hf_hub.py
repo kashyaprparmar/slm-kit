@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.db.models import Run
 from app.integrations.estimator import ModelSpec, spec_from_name
 from app.models.capabilities import resolve_capabilities
 
@@ -276,6 +277,7 @@ def publish_model(
     repo_id: str,
     private: bool = True,
     model_card: str | None = None,
+    on_commit=None,
 ) -> str:
     """Upload a local model dir to HF Hub; returns the repo URL. Requires token."""
     tok = _token()
@@ -287,7 +289,9 @@ def publish_model(
     api.create_repo(repo_id=repo_id, private=private, token=tok, exist_ok=True)
     if model_card:
         (Path(local_dir) / "README.md").write_text(model_card, encoding="utf-8")
-    api.upload_folder(folder_path=local_dir, repo_id=repo_id, token=tok)
+    commit = api.upload_folder(folder_path=local_dir, repo_id=repo_id, token=tok)
+    if on_commit:
+        on_commit(getattr(commit, "oid", None))
     return f"https://huggingface.co/{repo_id}"
 
 
@@ -302,3 +306,34 @@ def import_model(repo_id: str, dest_dir: str) -> str:
         cache_dir=str(_settings.hf_cache_dir),
     )
     return path
+
+
+def generate_model_card(run: Run) -> str:
+    from app.core.runner import _redact
+    cfg = _redact(run.config or {})
+    metrics = run.metrics or {}
+    hw = run.hardware or {}
+    lines = [
+        f"# {run.name}",
+        "",
+        "Model produced with **SLM Kit**.",
+        "",
+        "## Training summary",
+        f"- **Task:** {run.task}",
+        f"- **Method:** {run.method}",
+        f"- **Base model:** `{run.base_model}`",
+        f"- **Backend:** {run.backend}",
+        f"- **Trained:** {run.finished_at or run.started_at}",
+    ]
+    if hw.get("gpu_name"):
+        lines.append(f"- **Hardware:** {hw.get('gpu_name')} ({hw.get('vram_total_mb')} MB VRAM)")
+    lines += ["", "## Hyperparameters", "```json", _pretty(cfg), "```"]
+    if metrics:
+        lines += ["", "## Final metrics", "```json", _pretty(metrics), "```"]
+    lines += ["", "_Generated automatically from the run's stored metadata._"]
+    return "\n".join(lines)
+
+
+def _pretty(obj) -> str:
+
+    return json.dumps(obj, indent=2, default=str)

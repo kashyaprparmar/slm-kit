@@ -1,6 +1,6 @@
 # Phase B — Core training and optional backends
 
-**Status: Feature work not started; shared capability and selection interfaces established.** Detailed current implementation and impact records are in [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md). Requirement findings are in [GAP_ANALYSIS.md](GAP_ANALYSIS.md).
+**Status: Partially Complete.** The Phase B review now includes pre-launch Auto backend resolution, requested/effective backend evidence, an optional LLaMA-Factory adapter, process-tree cancellation, and idempotent artifact registration in addition to the B1-B4 training work. The complete CPU-safe suite passes. Real Transformers/PEFT/TRL/Unsloth/LLaMA-Factory jobs, held-out continued-pretraining evaluation, exact resume equivalence, early stopping, and several later Phase B acceptance items remain unverified or incomplete.
 
 ## Entry criteria
 
@@ -12,7 +12,7 @@ Previous phases satisfy their acceptance gates. Resolve task-specific dependenci
 
 Foundation note: backend/stage/method/tokenizer/PEFT/quantization descriptors and frontend consumption now exist. Runtime evidence and capability snapshots remain open.
 
-- [ ] Not started. Requirements: R02, R04, R26, R78, R83.
+- [~] Partially complete. Stage/method/runtime descriptors and installed dependency gates are authoritative for API and UI; runtime capability snapshots remain open. Requirements: R02, R04, R26, R78, R83.
 - Depends on: A16.
 - Change: Separate stage/method/engine capabilities and installed compatibility evidence.
 - Acceptance: Missing runtime cannot be advertised runnable; legacy payloads retained; unknown backend rejected.
@@ -36,9 +36,9 @@ Foundation note: backend/stage/method/tokenizer/PEFT/quantization descriptors an
 
 ### B04 — Resolve backend selection before launch
 
-Foundation note: exact registered-backend selection now uses a typed interface. Automatic equivalence-aware selection and persisted reasons remain open.
+Foundation note: Auto selection now evaluates the operation, model metadata, hardware, installed dependencies, objective, tokenizer policy, and runtime settings. It persists the requested backend, effective backend, selection reason, and rejected alternatives in Run config JSON and exposes the decision in the run plan.
 
-- [ ] Not started. Requirements: R83, R78.
+- [~] Partially complete. Pre-launch resolution and strict explicit selection are implemented and unit-tested. A loader-time Unsloth-to-native fallback is visible in logs but does not yet update a durable effective-loader snapshot. Requirements: R83, R78.
 - Depends on: B02, B03.
 - Change: Auto plan checks operation/model/hardware/dependencies; revalidate in worker.
 - Acceptance: Unsupported Unsloth selects native only when equivalent; runtime fallback recorded; strict request honored.
@@ -46,7 +46,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B05 — Discover adapter and freeze targets
 
-- [ ] Not started. Requirements: R05, R27, R56.
+- [~] Partially complete. Actual loaded modules drive auto/all-linear/attention/MLP/custom selection; exact matches and actual parameter counts are emitted. A real PEFT model fixture remains open. Requirements: R05, R27, R56.
 - Depends on: B03.
 - Change: Architecture module inspection; auto/all-linear/attention/MLP/custom targets; trainable counts.
 - Acceptance: Non-Llama models work; empty or invalid selections rejected; estimates use actual matched modules.
@@ -54,7 +54,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B06 — Implement freeze tuning execution
 
-- [ ] Not started. Requirements: R05, R04.
+- [~] Partially complete. Last-N layers, embeddings, LM head, norms, and custom modules are implemented with zero/unknown-selection rejection. A real optimizer-step mutation test remains open. Requirements: R05, R04.
 - Depends on: B05.
 - Change: Last N layers, embeddings/head/norm/selected modules with explicit trainability.
 - Acceptance: Only selected parameters change in tiny step; unsupported architectures rejected.
@@ -62,7 +62,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B07 — Expose precision and quantization policy
 
-- [ ] Not started. Requirements: R28, R29, R36.
+- [~] Partially complete. Precision, attention, checkpointing, Liger, RoPE and NF4/FP4/int8 policy are validated and capability-gated; optional GPU runtime combinations remain unverified. Requirements: R28, R29, R36.
 - Depends on: B01, B03.
 - Change: Auto/bf16/fp16/fp32 and NF4/FP4/8bit compute/storage/nested controls gated by runtime.
 - Acceptance: Unsupported dtype/quant combos fail before launch; effective settings match saved config.
@@ -70,7 +70,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B08 — Verify continued pretraining semantics
 
-- [ ] Not started. Requirements: R37.
+- [~] Partially complete. Continued pretraining defaults to packing and accepts only canonical raw text with causal-LM EOS handling; held-out validation wiring and a real tiny Transformers step remain open. Requirements: R37.
 - Depends on: A12, B03.
 - Change: Raw causal-LM path with explicit EOS/tokenization and packing parity; wire validation set.
 - Acceptance: Tiny continued-pretraining step uses no chat template; validation loss uses held-out split.
@@ -78,7 +78,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B09 — Restore exact scratch checkpoint resume
 
-- [ ] Not started. Requirements: R38.
+- [~] Partially complete. Scratch checkpoints save/restore model, optimizer, CPU/CUDA RNG, and step, validate architecture identity, and retain a weights-only legacy path. Interrupted-run equivalence remains unverified. Requirements: R38.
 - Depends on: A03.
 - Change: Save/restore optimizer, RNG, step and data cursor; explicit resume endpoint.
 - Acceptance: Interrupted seeded run matches uninterrupted steps; old artifacts remain loadable.
@@ -86,7 +86,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B10 — Add scratch tokenizer and architecture options
 
-- [ ] Not started. Requirements: R20, R38.
+- [~] Partially complete. Scratch byte-BPE training and local vocab/merges import are exposed through the shared config and UI; HF AutoConfig initialization and runtime reload evidence remain open. Requirements: R20, R38.
 - Depends on: A11, B09.
 - Change: Reuse/import/train tokenizer modes; optional HF from-config initialization behind capability.
 - Acceptance: Tiny supported architecture trains and reloads with chosen tokenizer; unsupported configs fail.
@@ -102,7 +102,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B12 — Register final artifacts and lineage
 
-- [ ] Not started. Requirements: R58, R59, R75, R76.
+- [~] Partially complete. Final checkpoint/artifact events idempotently register one `ModelArtifact` with backend, task, method, base revision, dataset, and reference lineage. Exact environment snapshots and generated model cards remain open. Requirements: R58, R59, R75, R76.
 - Depends on: A03, B04.
 - Change: Idempotent final artifact registration, exact revisions/environment and generated model card.
 - Acceptance: Successful run creates one artifact; retry duplicates prevented; existing run references preserved.
@@ -118,7 +118,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B14 — Add optional LLaMA-Factory discovery/config adapter
 
-- [ ] Not started. Requirements: R03, R78, R82, R84.
+- [~] Partially complete. Import-free package/CLI discovery, version reporting with a >=0.9 compatibility floor, capability-gated registration, actionable absence guidance, config translation, and canonical dataset translation are implemented. An installed-runtime compatibility matrix remains open. Requirements: R03, R78, R82, R84.
 - Depends on: B01, B03.
 - Change: Version-qualified optional registration and native config translation; install guidance.
 - Acceptance: Absent package does not affect startup/native training; unsupported options rejected; no mandatory dependency.
@@ -126,7 +126,7 @@ Foundation note: exact registered-backend selection now uses a typed interface. 
 
 ### B15 — Bridge LLaMA-Factory worker lifecycle
 
-- [ ] Not started. Requirements: R03, R71, R82.
+- [~] Partially complete. The optional CLI runs under the normal worker, GPU lease, event, checkpoint, artifact, cancellation, and failure lifecycle. Installed-runtime launch/cancel/failure contract tests remain open because the dependency is unavailable in the verification environment. Requirements: R03, R71, R82.
 - Depends on: B12, B14.
 - Change: Launch optional engine within supervised process tree; map metrics/checkpoints/final/cancel/errors.
 - Acceptance: Contract test covers logs, failure, cancellation and lineage; optional tiny installed-runtime job passes.
