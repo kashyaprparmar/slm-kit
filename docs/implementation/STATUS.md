@@ -153,6 +153,7 @@ See `ARCHITECTURE_DECISIONS.md`, including ADR-16 through ADR-18 and the Step 16
 - Focused benchmark/Ollama/export suite: **18 passed**, including deterministic streamed timing/percentile/VRAM persistence, mismatch rejection and Modelfile policy rendering.
 - Fresh/legacy migration plus Step 20 suite: **10 passed**. Full backend initially exposed three stale revision/nullability test expectations; those tests were updated for the additive frozen migration and the model/migration nullability contract was aligned.
 - Backend Ruff: passed. Frontend TypeScript/Vite production build: passed. The existing ESLint warning is unchanged.
+- CI compatibility repair: optional alignment-runtime tests now raise the standard-library `SkipTest` when Torch/TRL/PEFT are absent. `unittest discover` records a skip instead of a loader error; local CI-equivalent discovery, Ruff, bytecode compilation and the full pytest suite pass.
 
 ### Prior-phase verification history
 

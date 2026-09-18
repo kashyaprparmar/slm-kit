@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+from importlib.util import find_spec
+from unittest import SkipTest
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
@@ -12,9 +14,17 @@ from app.backends.unsloth_backend import UnslothBackend
 from app.db.models import Dataset
 from app.domain import RunConfig
 
-torch = pytest.importorskip("torch")
-pytest.importorskip("trl")
-pytest.importorskip("peft")
+# CI's lean lane uses unittest discovery, while the optional runtime lane uses
+# pytest. pytest.importorskip raises pytest's internal skip exception during
+# unittest module import, which unittest reports as a loader error. Use the
+# standard-library skip type at module scope so both runners classify an absent
+# ML stack as an intentional skip.
+_missing = [name for name in ("torch", "trl", "peft") if find_spec(name) is None]
+if _missing:
+    raise SkipTest("optional alignment runtime dependencies are unavailable: " + ", ".join(_missing))
+
+import torch  # noqa: E402  # Imported only after optional dependency detection.
+
 pytestmark = pytest.mark.alignment_runtime
 
 
